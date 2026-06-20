@@ -1,0 +1,28 @@
+[package]
+name = "todo-by"
+version = "0.0.0"
+edition = "2021"
+description = "Flag todo-by tags whose deadline date has passed, across any file type"
+license = "MIT"
+repository = "https://github.com/alies-dev/todo-by"
+readme = "README.md"
+keywords = ["todo", "deadline", "linter", "ci", "comments"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "todo-by"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+ignore = "0.4"
+regex = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
