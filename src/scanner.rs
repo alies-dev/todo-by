@@ -200,7 +200,8 @@ mod tests {
 
         // Consumed whole so deadline() reports it invalid instead of the
         // tag silently meaning "2026", i.e. a later deadline.
-        let (date, _) = match_line("// todo-by 2026-123 overlong month").unwrap();
+        let line = format!("// todo-by {} overlong month", "2026-123");
+        let (date, _) = match_line(&line).unwrap();
         assert_eq!(date, "2026-123");
     }
 }
