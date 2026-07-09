@@ -1,4 +1,3 @@
-use std::io::Read;
 use std::path::Path;
 
 use crate::date::{deadline, Date};
@@ -59,28 +58,30 @@ pub fn match_line(line: &str) -> Option<(&str, String)> {
     None
 }
 
-/// Parses `YYYY(-MM(-DD)?)?` at `start`, returns its end. Rejects a fifth digit.
+/// Parses `YYYY(-M+(-D+)?)?` at `start`, returns its end. Rejects a fifth
+/// year digit. Consumes sloppy components (`2026-1-5`, `2026-123`) in full so
+/// `date::deadline` can judge them numerically; truncating to `2026` here
+/// would silently postpone the deadline to Dec 31.
 fn parse_date_span(bytes: &[u8], start: usize) -> Option<usize> {
-    let n = bytes.len();
     let mut j = start;
     for _ in 0..4 {
-        if j >= n || !bytes[j].is_ascii_digit() {
+        if !bytes.get(j).is_some_and(u8::is_ascii_digit) {
             return None;
         }
         j += 1;
     }
+    if bytes.get(j).is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
     for _ in 0..2 {
-        if bytes.get(j) == Some(&b'-')
-            && bytes.get(j + 1).is_some_and(u8::is_ascii_digit)
-            && bytes.get(j + 2).is_some_and(u8::is_ascii_digit)
-        {
-            j += 3;
+        if bytes.get(j) == Some(&b'-') && bytes.get(j + 1).is_some_and(u8::is_ascii_digit) {
+            j += 1;
+            while bytes.get(j).is_some_and(u8::is_ascii_digit) {
+                j += 1;
+            }
         } else {
             break;
         }
-    }
-    if bytes.get(j).is_some_and(u8::is_ascii_digit) {
-        return None;
     }
     Some(j)
 }
@@ -98,17 +99,11 @@ fn clean_message(rest: &str) -> String {
     msg.trim().to_string()
 }
 
-pub fn scan_file(path: &Path, today: Date, findings: &mut Vec<Finding>) {
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return;
-    };
-    let mut content = Vec::new();
-    if file.read_to_end(&mut content).is_err() {
-        return;
-    }
+pub fn scan_file(path: &Path, today: Date, findings: &mut Vec<Finding>) -> std::io::Result<()> {
+    let content = std::fs::read(path)?;
     // binary heuristic: NUL byte in the first 8 KiB
     if content.iter().take(8192).any(|&b| b == 0) {
-        return;
+        return Ok(());
     }
     let text = String::from_utf8_lossy(&content);
 
@@ -130,6 +125,7 @@ pub fn scan_file(path: &Path, today: Date, findings: &mut Vec<Finding>) {
             });
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -197,9 +193,14 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_month_falls_back_to_year_precision() {
+    fn sloppy_dates_are_consumed_in_full_not_truncated() {
         let (date, msg) = match_line("// todo-by 2999-1-5 sloppy").unwrap();
-        assert_eq!(date, "2999");
-        assert_eq!(msg, "1-5 sloppy");
+        assert_eq!(date, "2999-1-5");
+        assert_eq!(msg, "sloppy");
+
+        // Consumed whole so deadline() reports it invalid instead of the
+        // tag silently meaning "2026", i.e. a later deadline.
+        let (date, _) = match_line("// todo-by 2026-123 overlong month").unwrap();
+        assert_eq!(date, "2026-123");
     }
 }

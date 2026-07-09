@@ -113,6 +113,13 @@ mod tests {
         assert_eq!(deadline("2026-13"), None);
         assert_eq!(deadline("2026-02-30"), None);
         assert_eq!(deadline("2026-00-01"), None);
+        assert_eq!(deadline("2026-123"), None);
+    }
+
+    #[test]
+    fn deadline_accepts_unpadded_components() {
+        assert_eq!(deadline("2026-1-5"), Some(date("2026-01-05")));
+        assert_eq!(deadline("2026-9"), Some(date("2026-09-30")));
     }
 
     #[test]

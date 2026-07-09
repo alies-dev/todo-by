@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -97,6 +98,19 @@ fn today_utc() -> Date {
     Date::from_days_since_epoch(secs.div_euclid(86_400))
 }
 
+// Workflow-command escaping:
+// https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands
+
+fn gh_escape_data(s: &str) -> String {
+    s.replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A")
+}
+
+fn gh_escape_property(s: &str) -> String {
+    gh_escape_data(s).replace(':', "%3A").replace(',', "%2C")
+}
+
 fn render(findings: &[Finding], format: Format) {
     match format {
         Format::Text => {
@@ -128,8 +142,11 @@ fn render(findings: &[Finding], format: Format) {
                     Kind::InvalidDate => format!("todo-by invalid date {}", f.date),
                 };
                 println!(
-                    "::error file={},line={},title={label}::{}",
-                    f.file, f.line, f.message
+                    "::error file={},line={},title={}::{}",
+                    gh_escape_property(&f.file),
+                    f.line,
+                    gh_escape_property(&label),
+                    gh_escape_data(&f.message)
                 );
             }
         }
@@ -181,27 +198,36 @@ fn main() -> ExitCode {
             // Respect .gitignore even outside a git repository.
             .require_git(false);
 
+        let io_error = AtomicBool::new(false);
         let (tx, rx) = mpsc::channel::<Finding>();
         builder.build_parallel().run(|| {
             let tx = tx.clone();
+            let io_error = &io_error;
             Box::new(move |entry| {
                 match entry {
                     Ok(entry) => {
                         if entry.file_type().is_some_and(|t| t.is_file()) {
                             let mut local = Vec::new();
-                            scanner::scan_file(entry.path(), today, &mut local);
+                            if let Err(err) = scanner::scan_file(entry.path(), today, &mut local) {
+                                eprintln!("todo-by: {}: {err}", entry.path().display());
+                                io_error.store(true, Ordering::Relaxed);
+                            }
                             for finding in local {
                                 let _ = tx.send(finding);
                             }
                         }
                     }
-                    Err(err) => eprintln!("todo-by: {err}"),
+                    Err(err) => {
+                        eprintln!("todo-by: {err}");
+                        io_error.store(true, Ordering::Relaxed);
+                    }
                 }
                 WalkState::Continue
             })
         });
         drop(tx);
         findings = rx.into_iter().collect();
+        had_error = had_error || io_error.load(Ordering::Relaxed);
     }
 
     findings.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
@@ -213,5 +239,18 @@ fn main() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn github_escaping_neutralizes_command_syntax() {
+        assert_eq!(gh_escape_property("a,b:c.txt"), "a%2Cb%3Ac.txt");
+        assert_eq!(gh_escape_property("50%,done"), "50%25%2Cdone");
+        assert_eq!(gh_escape_data("line1\nline2, 50%"), "line1%0Aline2, 50%25");
+        assert_eq!(gh_escape_data("cr\rlf"), "cr%0Dlf");
     }
 }
