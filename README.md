@@ -7,11 +7,11 @@ Flag `todo-by` tags whose deadline date has passed. Works on any file type.
 Tag any comment with a deadline date:
 
 ```js
-// @todo-by 2999-09-01 - Remove this legacy controller once signed URLs ship
+// @todo-by 2026-09-01 - Remove this legacy controller once signed URLs ship
 ```
 
 ```yaml
-# todo-by 2999-09 drop the legacy webhook once v2 ships
+# todo-by 2026-09 drop the legacy webhook once v2 ships
 ```
 
 `todo-by` scans the tree, validates each date, and exits non-zero when a deadline has passed, so it gates CI. It recognizes the tag in any comment style (docblocks, `//`, `#`, `--`, HTML, and so on) because it works on plain text, not language grammars.

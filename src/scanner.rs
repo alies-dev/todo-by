@@ -20,7 +20,7 @@ pub struct Finding {
 }
 
 /// Extracts `(date, message)` from a line with a todo-by tag, case-insensitive:
-/// `@todo-by 2999-12-31 message`, `TODO-BY: 2999-09 - message`, etc.
+/// `@todo-by 2026-12-31 message`, `TODO-BY: 2026-09 - message`, etc.
 pub fn match_line(line: &str) -> Option<(&str, String)> {
     let bytes = line.as_bytes();
     let n = bytes.len();
