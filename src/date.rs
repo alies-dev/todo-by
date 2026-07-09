@@ -69,18 +69,24 @@ pub fn days_in_month(year: i32, month: u32) -> u32 {
 }
 
 /// Deadline day for a written date: `2026` means Dec 31, `2026-09` means Sep 30.
-/// None for impossible dates like 2026-02-30.
+/// None for impossible dates like 2026-02-30 and for malformed tokens: a
+/// present-but-unparseable component (`2026-`, `2026-09x`) or trailing parts
+/// (`2026-1-2-3`) must not degrade to a shorter, later deadline.
 pub fn deadline(written: &str) -> Option<Date> {
     let mut parts = written.split('-');
     let year: i32 = parts.next()?.parse().ok()?;
-    let month: Option<u32> = parts.next().and_then(|m| m.parse().ok());
-    let day: Option<u32> = parts.next().and_then(|d| d.parse().ok());
-
-    match (month, day) {
-        (None, _) => Date::new(year, 12, 31),
-        (Some(m), None) => Date::new(year, m, days_in_month(year, m)),
-        (Some(m), Some(d)) => Date::new(year, m, d),
+    let month: u32 = match parts.next() {
+        None => return Date::new(year, 12, 31),
+        Some(m) => m.parse().ok()?,
+    };
+    let day: u32 = match parts.next() {
+        None => return Date::new(year, month, days_in_month(year, month)),
+        Some(d) => d.parse().ok()?,
+    };
+    if parts.next().is_some() {
+        return None;
     }
+    Date::new(year, month, day)
 }
 
 #[cfg(test)]
@@ -114,6 +120,15 @@ mod tests {
         assert_eq!(deadline("2026-02-30"), None);
         assert_eq!(deadline("2026-00-01"), None);
         assert_eq!(deadline("2026-123"), None);
+    }
+
+    #[test]
+    fn deadline_rejects_malformed_tokens() {
+        assert_eq!(deadline("2026/01/05"), None);
+        assert_eq!(deadline("2026-"), None);
+        assert_eq!(deadline("2026-09x"), None);
+        assert_eq!(deadline("2026-09-01x"), None);
+        assert_eq!(deadline("2026-1-2-3"), None);
     }
 
     #[test]

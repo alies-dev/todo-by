@@ -58,10 +58,12 @@ pub fn match_line(line: &str) -> Option<(&str, String)> {
     None
 }
 
-/// Parses `YYYY(-M+(-D+)?)?` at `start`, returns its end. Rejects a fifth
-/// year digit. Consumes sloppy components (`2026-1-5`, `2026-123`) in full so
-/// `date::deadline` can judge them numerically; truncating to `2026` here
-/// would silently postpone the deadline to Dec 31.
+/// Returns the end of the date-like token at `start`, or None when the tag
+/// has no date. Requires exactly four leading year digits (a fifth digit
+/// disqualifies the tag), then consumes the whole contiguous token (ASCII
+/// alphanumerics, '-', '/', '.') so malformed dates like `2026/01/05`,
+/// `2026-`, or `2026-09x` reach `date::deadline` intact and are reported
+/// invalid; truncating to a valid prefix would silently postpone the deadline.
 fn parse_date_span(bytes: &[u8], start: usize) -> Option<usize> {
     let mut j = start;
     for _ in 0..4 {
@@ -73,15 +75,11 @@ fn parse_date_span(bytes: &[u8], start: usize) -> Option<usize> {
     if bytes.get(j).is_some_and(u8::is_ascii_digit) {
         return None;
     }
-    for _ in 0..2 {
-        if bytes.get(j) == Some(&b'-') && bytes.get(j + 1).is_some_and(u8::is_ascii_digit) {
-            j += 1;
-            while bytes.get(j).is_some_and(u8::is_ascii_digit) {
-                j += 1;
-            }
-        } else {
-            break;
-        }
+    while bytes
+        .get(j)
+        .is_some_and(|&b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'/' | b'.'))
+    {
+        j += 1;
     }
     Some(j)
 }
@@ -203,5 +201,27 @@ mod tests {
         let line = format!("// todo-by {} overlong month", "2026-123");
         let (date, _) = match_line(&line).unwrap();
         assert_eq!(date, "2026-123");
+    }
+
+    #[test]
+    fn malformed_dates_are_consumed_whole_not_truncated() {
+        // built at runtime so a future dogfood scan doesn't flag the fixtures
+        for bad in [
+            "2026/01/05",
+            "2026.01.05",
+            "2026-",
+            "2026-09x",
+            "2026-1-2-3",
+        ] {
+            let line = format!("// todo-by {bad} typo");
+            let (date, msg) = match_line(&line).unwrap_or_else(|| panic!("no match: {line}"));
+            assert_eq!(date, bad, "date in {line:?}");
+            assert_eq!(msg, "typo", "message in {line:?}");
+            assert_eq!(
+                crate::date::deadline(date),
+                None,
+                "{bad:?} must be reported invalid, not truncated to a later deadline"
+            );
+        }
     }
 }
