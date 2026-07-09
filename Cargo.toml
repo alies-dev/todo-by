@@ -1,6 +1,6 @@
 [package]
 name = "todo-by"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 description = "Flag todo-by tags whose deadline date has passed, across any file type"
 license = "MIT"
@@ -14,12 +14,8 @@ name = "todo-by"
 path = "src/main.rs"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
+# ripgrep's walker: full gitignore semantics + parallel directory traversal.
 ignore = "0.4"
-regex = "1"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 
 [profile.release]
 strip = true
