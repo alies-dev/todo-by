@@ -163,7 +163,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "todo-by"
+name = "todo-by-cli"
 version = "0.1.0"
 dependencies = [
  "ignore",

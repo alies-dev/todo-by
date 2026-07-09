@@ -1,5 +1,10 @@
 # todo-by
 
+[![CI](https://github.com/alies-dev/todo-by/actions/workflows/ci.yml/badge.svg)](https://github.com/alies-dev/todo-by/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/todo-by-cli.svg)](https://crates.io/crates/todo-by-cli)
+[![docs.rs](https://img.shields.io/docsrs/todo-by-cli)](https://docs.rs/todo-by-cli)
+[![license](https://img.shields.io/crates/l/todo-by-cli.svg)](LICENSE)
+
 Flag `todo-by` tags whose deadline date has passed. Works on any file type.
 
 ## Idea
