@@ -1,24 +1,24 @@
 # todo-by
 
-Flag `todo-by` tags whose deadline date has passed. Works on any file type, not only PHP. A fast, standalone alternative to [staabm/phpstan-todo-by](https://github.com/staabm/phpstan-todo-by).
+Flag `todo-by` tags whose deadline date has passed. Works on any file type.
 
 ## Idea
 
 Tag any comment with a deadline date:
 
-```php
-/** @todo-by 2026-09-01 - Remove this legacy controller once signed URLs ship */
+```js
+// @todo-by 2026-09-01 - Remove this legacy controller once signed URLs ship
 ```
 
 ```yaml
 # todo-by 2026-09 drop the legacy webhook once v2 ships
 ```
 
-`todo-by` scans the tree, validates each date, and exits non-zero when a deadline has passed, so it gates CI. It recognizes the tag in any comment style (PHP docblocks, `//`, `#`, `--`, HTML, Twig, and so on) because it works on plain text, not language grammars.
+`todo-by` scans the tree, validates each date, and exits non-zero when a deadline has passed, so it gates CI. It recognizes the tag in any comment style (docblocks, `//`, `#`, `--`, HTML, and so on) because it works on plain text, not language grammars.
 
 ```console
 $ todo-by
-app/Console/Commands/PruneDeadAuthSessionsCommand.php:11: overdue since 2026-06-26: Remove it without asking any questions.
+config/legacy.yml:42: overdue since 2026-06-26: drop the legacy webhook once v2 ships
 1 finding
 ```
 
@@ -58,7 +58,7 @@ Everything git would track. `todo-by` uses ripgrep's directory walker, so `.giti
 
 ## Design goals
 
-A single small static binary and boring, predictable behavior. Scanning is parallel across cores: a large Laravel monorepo (about 13k tracked files) scans in under 0.2 seconds.
+A single small static binary and boring, predictable behavior. Scanning is parallel across cores: a large monorepo (about 13k tracked files) scans in under 0.2 seconds.
 
 ## Roadmap
 
@@ -68,10 +68,6 @@ A single small static binary and boring, predictable behavior. Scanning is paral
 - More triggers beyond dates: package versions (`todo-by >=2.0`), GitHub issues closed (`todo-by #123`), and similar
 - Warn-ahead mode (report tags due within N days before they fail CI)
 - Prebuilt binaries, Homebrew formula, Composer bin plugin, GitHub Action
-
-## Replacing staabm/phpstan-todo-by
-
-This tool covers the date-based subset of that PHPStan extension without requiring PHPStan to run, which makes it usable in pre-commit hooks and non-PHP repos. Version and ticket triggers are on the roadmap. The `@todo-by 2026-09-01` comment format is compatible, so switching requires no comment changes.
 
 ## License
 
