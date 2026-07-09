@@ -26,4 +26,3 @@ panic = "abort"
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
-lto = "thin"
