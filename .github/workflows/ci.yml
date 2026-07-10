@@ -20,7 +20,4 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
-      # dogfood scan disabled: README and doc comments carry literal example
-      # tags with realistic dates that would go overdue. Re-enable once
-      # config supports excluding files:
-      # - run: cargo run --locked --quiet -- --format github
+      - run: cargo run --locked --quiet -- --format github

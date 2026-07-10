@@ -1,0 +1,4 @@
+# Dogfood config for scanning this repository.
+exclude = [
+    "README.md", # usage examples carry realistic dates
+]

@@ -1,6 +1,6 @@
 [package]
 name = "todo-by-cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Flag todo-by tags whose deadline date has passed, across any file type"
 license = "MIT"
