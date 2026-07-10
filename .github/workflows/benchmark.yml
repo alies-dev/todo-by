@@ -1,0 +1,64 @@
+# Continuous benchmarking with Bencher (https://bencher.dev/perf/todo-by).
+# Scans a large pinned real-world repo and compares the PR binary against the
+# statistical baseline tracked from main (see benchmark-base.yml). Shared
+# runners are noisy; Bencher's thresholds account for that, but treat results
+# as ballpark, not precision.
+name: Benchmark PR
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Corpus to scan. Pin the ref so numbers stay comparable across PRs.
+  CORPUS_REPO: laravel/framework
+  CORPUS_REF: v13.19.0
+
+jobs:
+  benchmark:
+    # Fork PRs cannot read secrets, so this runs for same-repo PRs only.
+    if: github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft
+    permissions:
+      checks: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install hyperfine
+        uses: taiki-e/install-action@v2
+        with:
+          tool: hyperfine
+
+      - uses: bencherdev/bencher@5f9d4cf890255c35e0354af1ed325108a6a0babd # v0.6.8
+
+      - name: Fetch corpus
+        run: git clone --depth 1 --branch "$CORPUS_REF" "https://github.com/$CORPUS_REPO" /tmp/corpus
+
+      - name: Build PR binary
+        run: cargo build --release --locked
+
+      - name: Track PR benchmarks
+        run: |
+          bencher run \
+            --project todo-by \
+            --token '${{ secrets.BENCHER_API_KEY }}' \
+            --branch "$GITHUB_HEAD_REF" \
+            --start-point "$GITHUB_BASE_REF" \
+            --start-point-hash '${{ github.event.pull_request.base.sha }}' \
+            --start-point-clone-thresholds \
+            --start-point-reset \
+            --testbed ubuntu-latest \
+            --error-on-alert \
+            --adapter shell_hyperfine \
+            --file results.json \
+            --github-actions '${{ secrets.GITHUB_TOKEN }}' \
+            "hyperfine --warmup 3 --min-runs 10 --export-json results.json './target/release/todo-by --exit-zero /tmp/corpus'"

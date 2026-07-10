@@ -1,0 +1,49 @@
+# Tracks the statistical performance baseline on main for Bencher
+# (https://bencher.dev/perf/todo-by). PR runs (benchmark.yml) compare
+# against this baseline.
+name: Benchmark base
+
+on:
+  push:
+    branches: [main]
+
+env:
+  # Keep in sync with benchmark.yml.
+  CORPUS_REPO: laravel/framework
+  CORPUS_REF: v13.19.0
+
+jobs:
+  benchmark:
+    permissions:
+      checks: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install hyperfine
+        uses: taiki-e/install-action@v2
+        with:
+          tool: hyperfine
+
+      - uses: bencherdev/bencher@5f9d4cf890255c35e0354af1ed325108a6a0babd # v0.6.8
+
+      - name: Fetch corpus
+        run: git clone --depth 1 --branch "$CORPUS_REF" "https://github.com/$CORPUS_REPO" /tmp/corpus
+
+      - name: Build binary
+        run: cargo build --release --locked
+
+      - name: Track base benchmarks
+        run: |
+          bencher run \
+            --project todo-by \
+            --token '${{ secrets.BENCHER_API_KEY }}' \
+            --branch main \
+            --testbed ubuntu-latest \
+            --adapter shell_hyperfine \
+            --file results.json \
+            "hyperfine --warmup 3 --min-runs 10 --export-json results.json './target/release/todo-by --exit-zero /tmp/corpus'"
