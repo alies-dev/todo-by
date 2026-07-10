@@ -50,7 +50,7 @@ jobs:
         run: |
           bencher run \
             --project todo-by \
-            --token '${{ secrets.BENCHER_API_KEY }}' \
+            --key '${{ secrets.BENCHER_API_KEY }}' \
             --branch "$GITHUB_HEAD_REF" \
             --start-point "$GITHUB_BASE_REF" \
             --start-point-hash '${{ github.event.pull_request.base.sha }}' \

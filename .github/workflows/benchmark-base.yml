@@ -41,7 +41,7 @@ jobs:
         run: |
           bencher run \
             --project todo-by \
-            --token '${{ secrets.BENCHER_API_KEY }}' \
+            --key '${{ secrets.BENCHER_API_KEY }}' \
             --branch main \
             --testbed ubuntu-latest \
             --adapter shell_hyperfine \
