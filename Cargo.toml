@@ -2,6 +2,9 @@
 name = "todo-by-cli"
 version = "0.2.0"
 edition = "2021"
+# Floor set by lockfile-v4 deps that need edition2024 (stabilized in 1.85);
+# enforced by the msrv job in CI. Keep in sync with ci.yml.
+rust-version = "1.85"
 description = "Flag todo-by tags whose deadline date has passed, across any file type"
 license = "MIT"
 repository = "https://github.com/alies-dev/todo-by"
