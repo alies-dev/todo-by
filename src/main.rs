@@ -1,4 +1,4 @@
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -450,17 +450,17 @@ fn main() -> ExitCode {
     had_error = had_error || walk_error;
 
     if has_stdin {
-        match std::io::read_to_string(std::io::stdin()) {
-            Ok(input) => {
-                // binary heuristic: NUL byte in the first 8 KiB (mirrors scan_file)
-                if !input.as_bytes().iter().take(8192).any(|&b| b == 0) {
-                    let ctx = ScanCtx {
-                        today,
-                        warn_until,
-                        tags: &cfg.tags,
-                    };
-                    scanner::scan_text("<stdin>", &input, &ctx, &mut findings);
-                }
+        // Raw bytes, not read_to_string: invalid UTF-8 on stdin must scan
+        // lossily like file contents do, not abort with an I/O error.
+        let mut input = Vec::new();
+        match Read::read_to_end(&mut std::io::stdin(), &mut input) {
+            Ok(_) => {
+                let ctx = ScanCtx {
+                    today,
+                    warn_until,
+                    tags: &cfg.tags,
+                };
+                scanner::scan_bytes("<stdin>", &input, &ctx, &mut findings);
             }
             Err(err) => {
                 eprintln!("todo-by: <stdin>: {err}");

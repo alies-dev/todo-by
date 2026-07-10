@@ -123,13 +123,19 @@ fn clean_message(rest: &str) -> String {
 
 pub fn scan_file(path: &Path, ctx: &ScanCtx, findings: &mut Vec<Finding>) -> std::io::Result<()> {
     let content = std::fs::read(path)?;
-    // binary heuristic: NUL byte in the first 8 KiB
-    if content.iter().take(8192).any(|&b| b == 0) {
-        return Ok(());
-    }
-    let text = String::from_utf8_lossy(&content);
-    scan_text(&path.display().to_string(), &text, ctx, findings);
+    scan_bytes(&path.display().to_string(), &content, ctx, findings);
     Ok(())
+}
+
+/// Scans raw bytes (file contents or stdin): skips binary content (NUL byte
+/// in the first 8 KiB) and decodes the rest lossily, so invalid UTF-8 never
+/// aborts a scan.
+pub fn scan_bytes(file_label: &str, content: &[u8], ctx: &ScanCtx, findings: &mut Vec<Finding>) {
+    if content.iter().take(8192).any(|&b| b == 0) {
+        return;
+    }
+    let text = String::from_utf8_lossy(content);
+    scan_text(file_label, &text, ctx, findings);
 }
 
 pub fn scan_text(file_label: &str, text: &str, ctx: &ScanCtx, findings: &mut Vec<Finding>) {
@@ -381,6 +387,27 @@ mod tests {
         let mut findings = Vec::new();
         scan_text("f", "// todo-by 2999-01-10 near future", &c, &mut findings);
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn scan_bytes_skips_binary_and_decodes_invalid_utf8_lossily() {
+        let todo_by_tags = todo_by();
+        let today = Date::new(2999, 1, 1).unwrap();
+        let c = ctx(today, None, &todo_by_tags);
+
+        // NUL in the first 8 KiB: treated as binary, no findings.
+        let mut findings = Vec::new();
+        let binary = b"\x00// todo-by 2998-01-01 hidden in binary";
+        scan_bytes("bin", binary, &c, &mut findings);
+        assert!(findings.is_empty());
+
+        // Invalid UTF-8 elsewhere must not abort the scan of a valid tag.
+        let mut findings = Vec::new();
+        let mut content = b"\xff\xfe garbage\n".to_vec();
+        content.extend_from_slice(b"// todo-by 2998-01-01 still found\n");
+        scan_bytes("mixed", &content, &c, &mut findings);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].line, 2);
     }
 
     #[test]
