@@ -46,4 +46,4 @@ jobs:
             --testbed ubuntu-latest \
             --adapter shell_hyperfine \
             --file results.json \
-            "hyperfine --warmup 3 --min-runs 10 --export-json results.json './target/release/todo-by --exit-zero /tmp/corpus'"
+            "hyperfine --warmup 3 --min-runs 10 --ignore-failure --export-json results.json './target/release/todo-by /tmp/corpus'"
