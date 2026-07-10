@@ -399,9 +399,9 @@ fn main() -> ExitCode {
     let color = resolve_color(
         cli.color,
         std::io::stdout().is_terminal(),
-        std::env::var("NO_COLOR")
-            .map(|v| !v.is_empty())
-            .unwrap_or(false),
+        // var_os, not var: a non-UTF-8 value is still "present and not an
+        // empty string" per the NO_COLOR spec, so it must disable color.
+        std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
         std::env::var("TERM").map(|v| v == "dumb").unwrap_or(false),
     );
 
