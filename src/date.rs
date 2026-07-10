@@ -41,6 +41,22 @@ impl Date {
         let year = (if month <= 2 { year + 1 } else { year }) as i32;
         Self { year, month, day }
     }
+
+    /// Inverse of `from_days_since_epoch` (Hinnant's `days_from_civil`).
+    pub fn to_days_since_epoch(self) -> i64 {
+        let y = if self.month <= 2 {
+            self.year as i64 - 1
+        } else {
+            self.year as i64
+        };
+        let era = y.div_euclid(400);
+        let yoe = y.rem_euclid(400);
+        let m = self.month as i64;
+        let d = self.day as i64;
+        let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+        let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+        era * 146_097 + doe - 719_468
+    }
 }
 
 impl fmt::Display for Date {
@@ -70,7 +86,7 @@ pub fn days_in_month(year: i32, month: u32) -> u32 {
 
 /// Deadline day for a written date: `2026` means Dec 31, `2026-09` means Sep 30.
 /// None for impossible dates like 2026-02-30 and for malformed tokens: a
-/// present-but-unparseable component (`2026-`, `2026-09x`) or trailing parts
+/// present-but-unparsable component (`2026-`, `2026-09x`) or trailing parts
 /// (`2026-1-2-3`) must not degrade to a shorter, later deadline.
 pub fn deadline(written: &str) -> Option<Date> {
     let mut parts = written.split('-');
@@ -142,6 +158,29 @@ mod tests {
         assert_eq!(Date::from_days_since_epoch(0), date("1970-01-01"));
         assert_eq!(Date::from_days_since_epoch(19_723), date("2024-01-01"));
         assert_eq!(Date::from_days_since_epoch(20_643), date("2026-07-09"));
+    }
+
+    #[test]
+    fn to_days_since_epoch_round_trips_from_days_since_epoch() {
+        for days in [0, 19_723, 20_643, -1] {
+            let d = Date::from_days_since_epoch(days);
+            assert_eq!(d.to_days_since_epoch(), days, "round trip for {d}");
+        }
+    }
+
+    #[test]
+    fn to_days_since_epoch_matches_known_dates() {
+        assert_eq!(date("1970-01-01").to_days_since_epoch(), 0);
+        assert_eq!(date("2024-01-01").to_days_since_epoch(), 19_723);
+        assert_eq!(date("2026-07-09").to_days_since_epoch(), 20_643);
+        assert_eq!(date("1969-12-31").to_days_since_epoch(), -1);
+    }
+
+    #[test]
+    fn to_days_since_epoch_handles_leap_day() {
+        let leap_day = date("2024-02-29");
+        let days = leap_day.to_days_since_epoch();
+        assert_eq!(Date::from_days_since_epoch(days), leap_day);
     }
 
     #[test]
