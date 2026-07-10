@@ -35,11 +35,33 @@ pub struct ScanCtx<'a> {
 /// `@todo-by 2999-12-31 message`, `TODO-BY: 2999-09 - message`, etc. Tries
 /// `tags` in order at each scan position; the first tag that yields a full
 /// match (tag text, word boundary, and a date span) wins.
+#[cfg(test)]
 pub fn match_line<'a>(line: &'a str, tags: &[String]) -> Option<(&'a str, String)> {
+    match_line_in(line, tags, &tag_firsts(tags))
+}
+
+/// Lowercased first byte of each tag: the per-byte fast-reject set for
+/// [`match_line_in`]. Built once per file, not per line or per byte.
+fn tag_firsts(tags: &[String]) -> Vec<u8> {
+    tags.iter()
+        .filter_map(|t| t.as_bytes().first())
+        .map(u8::to_ascii_lowercase)
+        .collect()
+}
+
+fn match_line_in<'a>(line: &'a str, tags: &[String], firsts: &[u8]) -> Option<(&'a str, String)> {
     let bytes = line.as_bytes();
     let n = bytes.len();
     let mut i = 0;
     while i < n {
+        // Fast reject first: this loop runs for every byte of every scanned
+        // file, so nothing heavier than a first-byte comparison may sit on
+        // the common path (v0.1 had this shape; losing it cost ~25% wall
+        // time on real corpora).
+        if !firsts.contains(&bytes[i].to_ascii_lowercase()) {
+            i += 1;
+            continue;
+        }
         // word boundary: don't match inside identifiers. Independent of
         // which tag is tried, so check once per position.
         if i > 0 {
@@ -139,8 +161,9 @@ pub fn scan_bytes(file_label: &str, content: &[u8], ctx: &ScanCtx, findings: &mu
 }
 
 pub fn scan_text(file_label: &str, text: &str, ctx: &ScanCtx, findings: &mut Vec<Finding>) {
+    let firsts = tag_firsts(ctx.tags);
     for (idx, line) in text.lines().enumerate() {
-        let Some((written, message)) = match_line(line, ctx.tags) else {
+        let Some((written, message)) = match_line_in(line, ctx.tags, &firsts) else {
             continue;
         };
         let classified = match deadline(written) {
