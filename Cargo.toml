@@ -11,7 +11,7 @@ repository = "https://github.com/alies-dev/todo-by"
 readme = "README.md"
 # Whitelist the packaged files so local scratch dirs can never leak into
 # a published crate.
-include = ["src/**", "Cargo.toml", "README.md", "LICENSE"]
+include = ["/src/**", "/Cargo.toml", "/README.md", "/LICENSE"]
 keywords = ["todo", "deadline", "linter", "ci", "comments"]
 categories = ["command-line-utilities", "development-tools"]
 
