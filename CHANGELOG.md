@@ -7,8 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-12
+
 ### Added
 
+- Homebrew install: `brew install alies-dev/todo-by/todo-by`. The repository doubles as its own tap, and the formula is regenerated from the release checksums after each release.
 - Declared minimum supported Rust version (`rust-version = "1.85"`), enforced in CI.
 
 ## [0.2.0] - 2026-07-10
@@ -41,6 +44,7 @@ Initial release.
 - Exit codes: 0 clean, 1 findings, 2 error.
 - `--today` to override the clock for testing and dry runs.
 
-[Unreleased]: https://github.com/alies-dev/todo-by/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/alies-dev/todo-by/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/alies-dev/todo-by/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/alies-dev/todo-by/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/alies-dev/todo-by/releases/tag/v0.1.0

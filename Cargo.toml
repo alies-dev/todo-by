@@ -1,6 +1,6 @@
 [package]
 name = "todo-by-cli"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 # Floor set by lockfile-v4 deps that need edition2024 (stabilized in 1.85);
 # enforced by the msrv job in CI. Keep in sync with ci.yml and clippy.toml.
