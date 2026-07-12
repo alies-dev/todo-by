@@ -114,7 +114,7 @@ Use `--dump-config` to see the effective config and where it came from, and `--f
 
 ## Design goals
 
-A single small static binary and boring, predictable behavior. Scanning is parallel across cores: a large monorepo (about 13k tracked files) scans in under 0.2 seconds.
+A single small static binary and boring, predictable behavior. Scanning is parallel across cores: a real-world repo like `angular/angular` (about 10,000 files) scans in roughly 0.2 seconds on an Apple M4 Max.
 
 ## Roadmap
 

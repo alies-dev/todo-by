@@ -9,8 +9,8 @@ on:
 
 env:
   # Keep in sync with benchmark.yml.
-  CORPUS_REPO: laravel/framework
-  CORPUS_REF: v13.19.0
+  CORPUS_REPO: angular/angular
+  CORPUS_REF: v22.0.6
 
 jobs:
   benchmark:
@@ -48,4 +48,4 @@ jobs:
             --testbed ubuntu-latest \
             --adapter shell_hyperfine \
             --file results.json \
-            "hyperfine --warmup 3 --min-runs 10 --ignore-failure --command-name 'scan laravel/framework' --export-json results.json './target/release/todo-by /tmp/corpus'"
+            "hyperfine --warmup 3 --min-runs 10 --ignore-failure --command-name 'scan angular/angular' --export-json results.json './target/release/todo-by /tmp/corpus'"
