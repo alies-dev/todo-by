@@ -4,24 +4,7 @@
 [![crates.io](https://img.shields.io/crates/v/todo-by-cli.svg)](https://crates.io/crates/todo-by-cli)
 [![license](https://img.shields.io/crates/l/todo-by-cli.svg)](LICENSE)
 
-Flag `todo-by` tags whose deadline date has passed. Works on any file type.
-
-## Installation
-
-Homebrew (macOS, Linux):
-
-```console
-brew tap alies-dev/todo-by https://github.com/alies-dev/todo-by
-brew install alies-dev/todo-by/todo-by
-```
-
-Cargo:
-
-```console
-cargo install todo-by-cli
-```
-
-Or grab a prebuilt binary from [Releases](https://github.com/alies-dev/todo-by/releases).
+Flag `todo-by` tags whose deadline date has passed. Works on any file type. Tiny and lightning-fast. Respects your .gitignore.
 
 ## Idea
 
@@ -43,17 +26,34 @@ config/legacy.yml:42: overdue since 2026-06-26: drop the legacy webhook once v2 
 1 finding
 ```
 
-## Dates
+## What it's for
 
-Three precisions are supported. A tag becomes overdue the day its deadline is reached.
+Date-triggered chores rot in a backlog. "Remove once v2 ships" becomes a ticket nobody reopens, disconnected from the code it was about. `todo-by` welds the reminder to that code and lets the date, not a person, decide when it comes due.
 
-| Written as | Deadline |
-|---|---|
-| `2026-09-01` | that day |
-| `2026-09` | last day of that month |
-| `2026` | December 31 of that year |
+Reach for a tag when the task is:
 
-Impossible dates (for example `2026-02-30`) are reported as findings too, so typos cannot silently postpone a deadline forever.
+- **Small.** Anyone can finish it in a minute or two with zero extra context.
+- **Mechanical.** A cleanup (delete, revert, re-enable), not new work to design.
+- **Triggered.** It comes due on a date, a released version, or a downstream change.
+
+If it needs an owner or a conversation, use a real tracker instead. `todo-by` is the layer beneath the tracker, for the small stuff a tracker would only bury.
+
+## Installation
+
+Homebrew (macOS, Linux):
+
+```console
+brew tap alies-dev/todo-by https://github.com/alies-dev/todo-by
+brew install alies-dev/todo-by/todo-by
+```
+
+Cargo:
+
+```console
+cargo install todo-by-cli
+```
+
+Or grab a prebuilt binary from [Releases](https://github.com/alies-dev/todo-by/releases).
 
 ## Usage
 
@@ -74,7 +74,21 @@ todo-by --dump-config           # print effective config, then exit
 
 Exit codes: `0` no findings (warnings alone still exit 0), `1` findings, `2` usage, config, or I/O error.
 
-### Warn ahead
+## Triggers
+
+### Dates
+
+Three precisions are supported. A tag becomes overdue the day its deadline is reached.
+
+| Written as | Deadline |
+|---|---|
+| `2026-09-01` | that day |
+| `2026-09` | last day of that month |
+| `2026` | December 31 of that year |
+
+Impossible dates (for example `2026-02-30`) are reported as findings too, so typos cannot silently postpone a deadline forever.
+
+#### Warn ahead
 
 `--warn N` reports tags due within N days as warnings rather than errors, so a deadline surfaces in CI before it starts failing the build. It still exits 0.
 
@@ -86,26 +100,34 @@ src/legacy.rs:8: due in 5 days (2026-07-14): drop the feature flag
 
 In `--format github`, warnings render as `::warning` annotations instead of `::error`.
 
-### JSON output
+## CI (GitHub Actions)
 
-`--format json` prints JSON Lines: one object per finding, followed by a trailing summary record.
-
-```console
-$ todo-by --format json
-{"type":"finding","kind":"overdue","path":"src/lib.rs","line":12,"date":"2000-01-01","deadline":"2000-01-01","days_overdue":4,"message":"remove workaround"}
-...
-{"type":"summary","findings":2,"warnings":1}
-```
-
-The schema is additive-stable: fields keep their meaning across releases, and new ones may be added, but none are removed within a major version.
-
-### CI (GitHub Actions)
-
-`GITHUB_ACTIONS=true` is set automatically by GitHub Actions. When it is set and no `--format` flag is given, `todo-by` auto-selects `--format github`, so a bare invocation is enough.
+Download the prebuilt static (musl) binary, verify its checksum, and run it. No Rust toolchain and no compile step, so the job finishes in about a second. Pin the version and its checksum with the two variables; both come from the release's `sha256.sum`.
 
 ```yaml
-- run: todo-by
+name: todo-by
+on: [push, pull_request]
+
+jobs:
+  todo-by:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check overdue todo-by tags
+        env:
+          TODOBY_VERSION: v0.2.1
+          TODOBY_SHA256: 2a2d0396a592a16ab211604fdb1e860586676a1a0785a9c89cbfb377fe9d9234
+        run: |
+          ASSET="todo-by-cli-x86_64-unknown-linux-musl.tar.xz"
+          curl --proto '=https' --tlsv1.2 -sSfL \
+            "https://github.com/alies-dev/todo-by/releases/download/${TODOBY_VERSION}/${ASSET}" -o /tmp/todo-by.tar.xz
+          echo "${TODOBY_SHA256}  /tmp/todo-by.tar.xz" | sha256sum -c -
+          tar -xJf /tmp/todo-by.tar.xz -C /tmp
+          /tmp/todo-by-cli-x86_64-unknown-linux-musl/todo-by
 ```
+
+On a codebase with existing overdue tags, phase it in with `continue-on-error: true` on the step, or `todo-by --warn N --exit-zero` so deadlines surface without failing the build. Shorter but less strict: the release also ships an installer script (`curl ... todo-by-cli-installer.sh | sh`). Other methods (`cargo install todo-by-cli --locked`, Homebrew) work too. See [Installation](#installation).
 
 ## What gets scanned
 
@@ -129,14 +151,10 @@ Precedence: command line flags win, then the `TODO_BY_FORMAT` / `TODO_BY_WARN` e
 
 Use `--dump-config` to see the effective config and where it came from, and `--files` to see which files would be scanned.
 
-## Design goals
-
-A single small static binary and boring, predictable behavior. Scanning is parallel across cores: a real-world repo like `angular/angular` (~10K files) scans in roughly 0.2 seconds.
-
 ## Roadmap
 
-- More triggers beyond dates: package versions (`todo-by >=2.0`), GitHub issues closed (`todo-by #123`), and similar
-- Composer bin plugin, GitHub Action
+- Package version trigger (`todo-by >=2.0`)
+- GitHub issue closed trigger (`todo-by #123`)
 
 ## Prior art
 
