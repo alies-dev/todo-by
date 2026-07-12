@@ -1,0 +1,2 @@
+# Keep in sync with rust-version in Cargo.toml and the msrv job in ci.yml.
+msrv = "1.85"
