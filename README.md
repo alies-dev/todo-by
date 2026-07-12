@@ -6,6 +6,23 @@
 
 Flag `todo-by` tags whose deadline date has passed. Works on any file type.
 
+## Installation
+
+Homebrew (macOS, Linux):
+
+```console
+brew tap alies-dev/todo-by https://github.com/alies-dev/todo-by
+brew install alies-dev/todo-by/todo-by
+```
+
+Cargo:
+
+```console
+cargo install todo-by-cli
+```
+
+Or grab a prebuilt binary from [Releases](https://github.com/alies-dev/todo-by/releases).
+
 ## Idea
 
 Tag any comment with a deadline date:
@@ -114,12 +131,12 @@ Use `--dump-config` to see the effective config and where it came from, and `--f
 
 ## Design goals
 
-A single small static binary and boring, predictable behavior. Scanning is parallel across cores: a real-world repo like `angular/angular` (about 10,000 files) scans in roughly 0.2 seconds on an Apple M4 Max.
+A single small static binary and boring, predictable behavior. Scanning is parallel across cores: a real-world repo like `angular/angular` (~10K files) scans in roughly 0.2 seconds.
 
 ## Roadmap
 
 - More triggers beyond dates: package versions (`todo-by >=2.0`), GitHub issues closed (`todo-by #123`), and similar
-- Prebuilt binaries, Homebrew formula, Composer bin plugin, GitHub Action
+- Composer bin plugin, GitHub Action
 
 ## Prior art
 

@@ -1,0 +1,120 @@
+name: Update Homebrew tap
+
+# Runs after the cargo-dist Release workflow publishes a GitHub release.
+# Regenerates Formula/todo-by.rb with the new version and asset checksums,
+# then commits it to the default branch via the Contents API.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to (re)generate the formula from, e.g. v0.2.0"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  update-formula:
+    if: ${{ github.event_name == 'workflow_dispatch' || (!github.event.release.prerelease && !github.event.release.draft) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@8edcb1bdb4e267140fa742c62e395cd74f332d67 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Download checksums
+        env:
+          TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+        run: |
+          curl -fsSL -o sha256.sum \
+            "https://github.com/${{ github.repository }}/releases/download/${TAG}/sha256.sum"
+
+      - name: Update formula
+        env:
+          TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+        run: |
+          VERSION="${TAG#v}"
+          sha() { grep " \*todo-by-cli-$1\.tar\.xz\$" sha256.sum | awk '{print $1}'; }
+          MAC_ARM=$(sha aarch64-apple-darwin)
+          MAC_INTEL=$(sha x86_64-apple-darwin)
+          LINUX_INTEL=$(sha x86_64-unknown-linux-gnu)
+
+          for v in MAC_ARM MAC_INTEL LINUX_INTEL; do
+            if [ -z "${!v}" ]; then
+              echo "Missing sha256 for $v" >&2
+              exit 1
+            fi
+          done
+
+          mkdir -p Formula
+          cat > Formula/todo-by.rb <<EOF
+          # This repo doubles as a Homebrew tap. Users install with:
+          #   brew tap alies-dev/todo-by https://github.com/alies-dev/todo-by
+          #   brew install alies-dev/todo-by/todo-by
+          #
+          # This file is updated automatically by the homebrew-tap workflow.
+
+          class TodoBy < Formula
+            desc "Flag todo-by tags whose deadline date has passed, across any file type"
+            homepage "https://github.com/alies-dev/todo-by"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/alies-dev/todo-by/releases/download/v#{version}/todo-by-cli-aarch64-apple-darwin.tar.xz"
+                sha256 "${MAC_ARM}"
+              end
+              on_intel do
+                url "https://github.com/alies-dev/todo-by/releases/download/v#{version}/todo-by-cli-x86_64-apple-darwin.tar.xz"
+                sha256 "${MAC_INTEL}"
+              end
+            end
+
+            on_linux do
+              on_intel do
+                url "https://github.com/alies-dev/todo-by/releases/download/v#{version}/todo-by-cli-x86_64-unknown-linux-gnu.tar.xz"
+                sha256 "${LINUX_INTEL}"
+              end
+            end
+
+            def install
+              bin.install "todo-by"
+            end
+
+            test do
+              assert_match "todo-by", shell_output("#{bin}/todo-by --help")
+            end
+          end
+          EOF
+
+      - name: Commit formula via Contents API
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+        run: |
+          BRANCH="${{ github.event.repository.default_branch }}"
+
+          CURRENT_SHA=$(gh api \
+            "repos/${{ github.repository }}/contents/Formula/todo-by.rb?ref=${BRANCH}" \
+            --jq .sha 2>/dev/null || true)
+
+          CONTENT_B64=$(base64 -w0 < Formula/todo-by.rb)
+
+          ARGS=(
+            -X PUT
+            "repos/${{ github.repository }}/contents/Formula/todo-by.rb"
+            -f "message=chore: bump homebrew formula to ${TAG} [skip ci]"
+            -f "content=${CONTENT_B64}"
+            -f "branch=${BRANCH}"
+          )
+          if [ -n "$CURRENT_SHA" ]; then
+            ARGS+=(-f "sha=${CURRENT_SHA}")
+          fi
+
+          gh api "${ARGS[@]}"
