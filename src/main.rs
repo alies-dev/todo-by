@@ -216,7 +216,7 @@ fn resolve_color(
 /// paths in the same (usually relative) form the scan roots were given in,
 /// so anchored globs only match against the right base when both share the
 /// current directory as their basis. Rooting at the config file's directory
-/// instead would silently mis-anchor patterns whenever the config lives in
+/// instead would silently anchor patterns wrongly whenever the config lives in
 /// an ancestor of the invocation directory.
 fn build_overrides(root: &Path, patterns: &[String]) -> Result<Option<Override>, String> {
     if patterns.is_empty() {

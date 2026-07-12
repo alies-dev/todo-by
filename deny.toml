@@ -1,0 +1,25 @@
+# cargo-deny configuration (checked by the deny job in CI).
+# https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+# Everything in the current tree is MIT OR Apache-2.0, Unlicense OR MIT,
+# or (for unicode-ident) additionally Unicode-3.0.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+]
+
+[bans]
+multiple-versions = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
