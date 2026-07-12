@@ -7,24 +7,24 @@
 class TodoBy < Formula
   desc "Flag todo-by tags whose deadline date has passed, across any file type"
   homepage "https://github.com/alies-dev/todo-by"
-  version "0.2.0"
+  version "0.2.1"
   license "MIT"
 
   on_macos do
     on_arm do
       url "https://github.com/alies-dev/todo-by/releases/download/v#{version}/todo-by-cli-aarch64-apple-darwin.tar.xz"
-      sha256 "605312ca35c49ddc7c25fc5873a3922d3426048827f5db7b85ee217b6da37e3c"
+      sha256 "46b344c1a617736a9fb4bee9f77d29d51c9cd99efc1ca3aa8d4aaafdbda9801c"
     end
     on_intel do
       url "https://github.com/alies-dev/todo-by/releases/download/v#{version}/todo-by-cli-x86_64-apple-darwin.tar.xz"
-      sha256 "0cf1cc5f7a103b4c1b342c3c0f877b86dde5d214c86e08f4c54d6cd4dbebde36"
+      sha256 "151ab6a57d88533cec092a74997685d3fe41b671d5df315a5c018284b00475a1"
     end
   end
 
   on_linux do
     on_intel do
       url "https://github.com/alies-dev/todo-by/releases/download/v#{version}/todo-by-cli-x86_64-unknown-linux-gnu.tar.xz"
-      sha256 "95887668cf8960e54935f3ba13c0a57829a856612d9a300b87a33e40b97cdb03"
+      sha256 "bb09fb66db08eb31dcd1fd9853cc23162106ca3a2f5d32b4e487925a3337eb8e"
     end
   end
 
