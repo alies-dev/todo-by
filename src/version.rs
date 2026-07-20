@@ -2,6 +2,7 @@
 //! triggers, e.g. a tag written `>=2.0` firing once the project reaches 2.0.
 
 use std::cmp::Ordering;
+use std::fmt;
 
 /// A parsed version: a numeric core (1 to 3 dot-separated components) plus
 /// an optional pre-release suffix. Build metadata (`+...`) is accepted by
@@ -103,6 +104,27 @@ impl PartialEq for Version {
     }
 }
 
+/// Renders the parsed core (as many components as were written, not
+/// zero-padded) plus `-pre` when present. Build metadata isn't stored, so
+/// it never round-trips: `Version::parse("v2.1+build")` displays as `2.1`.
+/// This is what lets `main.rs` derive a current-version display string
+/// straight from a parsed `Version` instead of hand-stripping a `v`/`V`
+/// prefix itself.
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (i, part) in self.parts.iter().enumerate() {
+            if i > 0 {
+                write!(f, ".")?;
+            }
+            write!(f, "{part}")?;
+        }
+        if let Some(pre) = &self.pre {
+            write!(f, "-{pre}")?;
+        }
+        Ok(())
+    }
+}
+
 /// Semver precedence rule 11: compare pre-release identifiers dot by dot;
 /// numeric identifiers compare numerically and always rank below
 /// alphanumeric ones; a pre-release with more identifiers outranks a
@@ -138,6 +160,12 @@ fn compare_pre_identifier(a: &str, b: &str) -> Ordering {
     }
 }
 
+/// Leading zeroes are accepted and compared numerically (`01` == `1`):
+/// deliberate leniency, consistent with this parser accepting 1 or 2
+/// component cores and a leading `v`. Strict semver (section 9) would
+/// instead deem the whole version invalid; reinterpreting `01` as
+/// alphanumeric would rank it above every numeric identifier, which is
+/// worse than either option.
 fn is_numeric_identifier(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
@@ -181,6 +209,20 @@ impl Constraint {
         }
     }
 }
+
+/// All comparators the scanner should recognize as "this position might be
+/// a version constraint": the union of what `Constraint::parse` accepts
+/// (`>=`, `>`) and what `unsupported_comparator` rejects (`==`, `<=`, `<`,
+/// `=`). Ordered longest-prefix-first so `>=`/`<=`/`==` are matched before
+/// their single-character prefixes `>`/`<`/`=` (matching `>` first on
+/// `>=2.0` would wrongly leave `=2.0` as the "version" token).
+///
+/// The scanner's span detection consumes directly from this list, so a
+/// comparator missing here is never even recognized as a trigger position:
+/// that's a silent false negative (never reported at all, not even as
+/// `InvalidTrigger`), not a loud rejection. Keep this in sync with
+/// `Constraint::parse` and [`UNSUPPORTED_COMPARATORS`].
+pub const COMPARATORS: [&str; 6] = [">=", "<=", "==", ">", "<", "="];
 
 /// Comparators phpstan-todo-by users bring over meaning "before version X"
 /// (`<1.0`, `<=1.0`, `=1.0`, `==1.0`). Silently treating them as unparsable
@@ -284,6 +326,14 @@ mod tests {
     }
 
     #[test]
+    fn leading_zero_numeric_identifiers_compare_numerically() {
+        // Deliberate leniency: strict SemVer rejects a leading zero here
+        // outright, but this parser treats "01" as the number 1.
+        assert_eq!(v("1.0.0-alpha.01"), v("1.0.0-alpha.1"));
+        assert!(v("1.0.0-alpha.010") < v("1.0.0-alpha.11"));
+    }
+
+    #[test]
     fn constraint_parses_ge_and_gt_only() {
         let c = Constraint::parse(">=2.0").unwrap();
         assert_eq!(c.cmp, Cmp::Ge);
@@ -315,6 +365,20 @@ mod tests {
         let gt = Constraint::parse(">2.0").unwrap();
         assert!(!gt.satisfied_by(&v("2.0")));
         assert!(gt.satisfied_by(&v("2.0.1")));
+    }
+
+    #[test]
+    fn display_renders_parsed_core_and_pre_without_v_prefix_or_build() {
+        assert_eq!(Version::parse("v2.1").unwrap().to_string(), "2.1");
+        assert_eq!(Version::parse("2").unwrap().to_string(), "2");
+        assert_eq!(
+            Version::parse("2.0.0-rc.1").unwrap().to_string(),
+            "2.0.0-rc.1"
+        );
+        assert_eq!(
+            Version::parse("V3.4.5+build.1").unwrap().to_string(),
+            "3.4.5"
+        );
     }
 
     #[test]

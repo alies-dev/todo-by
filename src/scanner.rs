@@ -1,44 +1,45 @@
 use std::path::Path;
 
 use crate::date::{deadline, Date};
-use crate::version::Constraint;
+use crate::version::{Constraint, COMPARATORS};
 
+/// What triggered a finding, and its outcome. `written` preserves the
+/// source text exactly (not normalized) on every variant, so output can
+/// quote the tag as the author wrote it. Carrying each variant's data
+/// directly (rather than a parallel `Trigger` enum) makes the pairing
+/// compile-time: there's no way to construct, say, an `Overdue` without a
+/// `deadline`, or a `VersionReached` that also carries a `Constraint`.
 pub enum Kind {
-    Overdue,
+    Overdue {
+        written: String,
+        deadline: Date,
+    },
     /// Due within the warn window, not yet overdue.
-    DueSoon,
+    DueSoon {
+        written: String,
+        deadline: Date,
+    },
     /// Impossible date, e.g. 2026-02-30.
-    InvalidDate,
+    InvalidDate {
+        written: String,
+    },
     /// A syntactically valid constraint whose satisfaction the scanner
     /// can't judge: it doesn't know the project's current version. main.rs
-    /// resolves these once, after the scan, into `VersionReached` (dropping
-    /// it into that kind) or drops the finding entirely when not yet
-    /// satisfied. Never reaches output rendering.
-    VersionPending,
+    /// resolves these once, after the scan, into `VersionReached` or drops
+    /// the finding entirely when not yet satisfied. Never reaches output
+    /// rendering.
+    VersionPending {
+        written: String,
+        constraint: Constraint,
+    },
     /// The current version satisfies a version constraint.
-    VersionReached,
+    VersionReached {
+        written: String,
+    },
     /// Bad version syntax, or a syntactically version-like but unsupported
     /// comparator (`<`, `<=`, `=`, `==`).
-    InvalidTrigger,
-}
-
-/// What triggered a finding: a date deadline or a version constraint.
-/// `written` preserves the source text exactly (not normalized), the same
-/// way the old `date` field did, so output can quote the tag as the author
-/// wrote it.
-pub enum Trigger {
-    Date {
+    InvalidTrigger {
         written: String,
-        /// Normalized deadline day; None when the date is invalid.
-        deadline: Option<Date>,
-    },
-    Version {
-        written: String,
-        /// None when the syntax is malformed or the comparator unsupported.
-        constraint: Option<Constraint>,
-        /// Filled in by main.rs when a `VersionPending` finding is promoted
-        /// to `VersionReached`; unset otherwise.
-        current_version: Option<String>,
     },
 }
 
@@ -46,7 +47,6 @@ pub struct Finding {
     pub file: String,
     pub line: usize,
     pub kind: Kind,
-    pub trigger: Trigger,
     pub message: String,
 }
 
@@ -162,12 +162,6 @@ fn parse_date_span(bytes: &[u8], start: usize) -> Option<usize> {
     Some(j)
 }
 
-/// Comparators recognized at a trigger position, ordered so a comparator
-/// that's a prefix of another (`>` of `>=`, `<` of `<=`, `=` of `==`) is
-/// tried second: matching `>` first on `>=2.0` would wrongly leave `=2.0`
-/// as the "version" token.
-const COMPARATORS: [&str; 6] = [">=", "<=", "==", ">", "<", "="];
-
 /// Returns the end of the `comparator + version` token at `start`, or None
 /// when there's no recognized comparator here, or it isn't immediately
 /// (no space) followed by a version-like token: the byte after the
@@ -236,14 +230,13 @@ pub fn scan_text(file_label: &str, text: &str, ctx: &ScanCtx, findings: &mut Vec
         let Some((written, message)) = match_line_in(line, ctx.tags, &firsts) else {
             continue;
         };
-        let Some((kind, trigger)) = classify(written, ctx) else {
+        let Some(kind) = classify(written, ctx) else {
             continue;
         };
         findings.push(Finding {
             file: file_label.to_string(),
             line: idx + 1,
             kind,
-            trigger,
             message,
         });
     }
@@ -254,24 +247,24 @@ pub fn scan_text(file_label: &str, text: &str, ctx: &ScanCtx, findings: &mut Vec
 /// always starts with a digit (`parse_date_span` requires four leading
 /// digits); a version span always starts with a comparator character, so
 /// the leading byte alone tells the two apart.
-fn classify(written: &str, ctx: &ScanCtx) -> Option<(Kind, Trigger)> {
+fn classify(written: &str, ctx: &ScanCtx) -> Option<Kind> {
     if written.as_bytes()[0].is_ascii_digit() {
-        let due = deadline(written);
-        let kind = match due {
-            None => Kind::InvalidDate,
-            Some(due) if due <= ctx.today => Kind::Overdue,
-            Some(due) => match ctx.warn_until {
-                Some(w) if due <= w => Kind::DueSoon,
-                _ => return None,
-            },
-        };
-        Some((
-            kind,
-            Trigger::Date {
+        match deadline(written) {
+            None => Some(Kind::InvalidDate {
+                written: written.to_string(),
+            }),
+            Some(due) if due <= ctx.today => Some(Kind::Overdue {
                 written: written.to_string(),
                 deadline: due,
+            }),
+            Some(due) => match ctx.warn_until {
+                Some(w) if due <= w => Some(Kind::DueSoon {
+                    written: written.to_string(),
+                    deadline: due,
+                }),
+                _ => None,
             },
-        ))
+        }
     } else {
         // Warn-ahead never applies here: a future version isn't knowable at
         // scan time, so there's no "due soon" analog. The scanner can't
@@ -279,20 +272,15 @@ fn classify(written: &str, ctx: &ScanCtx) -> Option<(Kind, Trigger)> {
         // version (which it doesn't have); that's why every valid
         // constraint becomes a VersionPending candidate for main.rs to
         // resolve, unconditionally.
-        let constraint = Constraint::parse(written);
-        let kind = if constraint.is_some() {
-            Kind::VersionPending
-        } else {
-            Kind::InvalidTrigger
-        };
-        Some((
-            kind,
-            Trigger::Version {
+        Some(match Constraint::parse(written) {
+            Some(constraint) => Kind::VersionPending {
                 written: written.to_string(),
                 constraint,
-                current_version: None,
             },
-        ))
+            None => Kind::InvalidTrigger {
+                written: written.to_string(),
+            },
+        })
     }
 }
 
@@ -474,9 +462,9 @@ mod tests {
     }
 
     fn deadline_of(f: &Finding) -> Option<Date> {
-        match &f.trigger {
-            Trigger::Date { deadline, .. } => *deadline,
-            Trigger::Version { .. } => panic!("expected a Trigger::Date finding"),
+        match &f.kind {
+            Kind::Overdue { deadline, .. } | Kind::DueSoon { deadline, .. } => Some(*deadline),
+            _ => panic!("expected an Overdue or DueSoon finding"),
         }
     }
 
@@ -491,7 +479,7 @@ mod tests {
         let mut findings = Vec::new();
         scan_text("f", "// todo-by 2999-01-10 in window", &c, &mut findings);
         assert_eq!(findings.len(), 1);
-        assert!(matches!(findings[0].kind, Kind::DueSoon));
+        assert!(matches!(findings[0].kind, Kind::DueSoon { .. }));
         assert_eq!(deadline_of(&findings[0]), Date::new(2999, 1, 10));
 
         // beyond warn window: no finding
@@ -513,7 +501,7 @@ mod tests {
             &mut findings,
         );
         assert_eq!(findings.len(), 1);
-        assert!(matches!(findings[0].kind, Kind::Overdue));
+        assert!(matches!(findings[0].kind, Kind::Overdue { .. }));
         assert_eq!(deadline_of(&findings[0]), Date::new(2998, 12, 31));
     }
 
@@ -612,17 +600,9 @@ mod tests {
             let mut findings = Vec::new();
             scan_text("f", &line, &c, &mut findings);
             assert_eq!(findings.len(), 1, "{line:?}");
-            assert!(matches!(findings[0].kind, Kind::InvalidTrigger), "{line:?}");
-            match &findings[0].trigger {
-                Trigger::Version {
-                    written: w,
-                    constraint,
-                    ..
-                } => {
-                    assert_eq!(w, &written, "{line:?}");
-                    assert!(constraint.is_none(), "{line:?}");
-                }
-                Trigger::Date { .. } => panic!("expected Trigger::Version for {line:?}"),
+            match &findings[0].kind {
+                Kind::InvalidTrigger { written: w } => assert_eq!(w, &written, "{line:?}"),
+                _ => panic!("expected InvalidTrigger for {line:?}"),
             }
         }
     }
@@ -666,7 +646,7 @@ mod tests {
         let mut findings = Vec::new();
         scan_text("f", &line, &ctx(today, None, &todo_by_tags), &mut findings);
         assert_eq!(findings.len(), 1);
-        assert!(matches!(findings[0].kind, Kind::VersionPending));
+        assert!(matches!(findings[0].kind, Kind::VersionPending { .. }));
 
         let mut findings = Vec::new();
         scan_text(
@@ -676,6 +656,6 @@ mod tests {
             &mut findings,
         );
         assert_eq!(findings.len(), 1);
-        assert!(matches!(findings[0].kind, Kind::VersionPending));
+        assert!(matches!(findings[0].kind, Kind::VersionPending { .. }));
     }
 }

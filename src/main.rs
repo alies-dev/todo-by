@@ -16,7 +16,7 @@ mod version;
 
 use date::Date;
 use output::{Format, RenderOpts};
-use scanner::{Finding, ScanCtx, Trigger};
+use scanner::{Finding, ScanCtx};
 use version::Version;
 
 const USAGE: &str = "\
@@ -323,33 +323,26 @@ fn run_git_describe(invocation_dir: &Path) -> Result<String, String> {
 }
 
 /// Resolves every `VersionPending` finding the scanner couldn't classify on
-/// its own: promotes satisfied ones to `VersionReached`, recording the
-/// current version for display, and drops the rest. Skips (rather than
-/// panics on) a `VersionPending` finding whose constraint is somehow
-/// missing, since that combination should be unreachable from `scanner`.
-fn resolve_version_candidates(
-    findings: &mut Vec<Finding>,
-    current: &Version,
-    current_display: &str,
-) {
-    for f in findings.iter_mut() {
-        if !matches!(f.kind, scanner::Kind::VersionPending) {
-            continue;
-        }
-        let Trigger::Version {
-            constraint: Some(c),
-            current_version,
-            ..
-        } = &mut f.trigger
+/// its own: promotes satisfied ones to `VersionReached { written }`, and
+/// drops the rest. The current version itself isn't stored on the
+/// finding: it's the same for every finding in a run, so it travels once
+/// via `RenderOpts` instead (set by the caller after this returns).
+fn resolve_version_candidates(findings: &mut Vec<Finding>, current: &Version) {
+    findings.retain_mut(|f| {
+        let scanner::Kind::VersionPending {
+            written,
+            constraint,
+        } = &f.kind
         else {
-            continue;
+            return true; // not a version candidate, keep as-is
         };
-        if c.satisfied_by(current) {
-            f.kind = scanner::Kind::VersionReached;
-            *current_version = Some(current_display.to_string());
+        if !constraint.satisfied_by(current) {
+            return false; // not yet satisfied, drop
         }
-    }
-    findings.retain(|f| !matches!(f.kind, scanner::Kind::VersionPending));
+        let written = written.clone();
+        f.kind = scanner::Kind::VersionReached { written };
+        true
+    });
 }
 
 /// Resolves whether Text output should be colored. `auto` requires a TTY
@@ -634,9 +627,10 @@ fn main() -> ExitCode {
     // version tags in comments never runs git and never fails over missing
     // tags; invalid-trigger findings alone (already fully classified) don't
     // count as a candidate either.
+    let mut current_version: Option<String> = None;
     if findings
         .iter()
-        .any(|f| matches!(f.kind, scanner::Kind::VersionPending))
+        .any(|f| matches!(f.kind, scanner::Kind::VersionPending { .. }))
     {
         let source = choose_version_source(
             cli.current_version.as_deref(),
@@ -651,15 +645,18 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
         };
-        let display = raw.strip_prefix(['v', 'V']).unwrap_or(&raw).to_string();
-        let current = match Version::parse(&display) {
+        // Version::parse strips a leading v/V itself, so this is the only
+        // place main.rs touches the raw resolved string; the display form
+        // comes from the parsed Version's Display, not from `raw` again.
+        let current = match Version::parse(&raw) {
             Some(v) => v,
             None => {
                 eprintln!("todo-by: current version {raw:?} from {label} is not a valid version");
                 return ExitCode::from(2);
             }
         };
-        resolve_version_candidates(&mut findings, &current, &display);
+        resolve_version_candidates(&mut findings, &current);
+        current_version = Some(current.to_string());
     }
 
     findings.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
@@ -668,6 +665,7 @@ fn main() -> ExitCode {
         format,
         color,
         today,
+        current_version,
     };
     output::render(&findings, &opts);
 
@@ -928,11 +926,9 @@ mod tests {
         Finding {
             file: "a.rs".to_string(),
             line: 1,
-            kind: scanner::Kind::VersionPending,
-            trigger: Trigger::Version {
+            kind: scanner::Kind::VersionPending {
                 written: written.to_string(),
-                constraint: version::Constraint::parse(written),
-                current_version: None,
+                constraint: version::Constraint::parse(written).unwrap(),
             },
             message: message.to_string(),
         }
@@ -945,16 +941,13 @@ mod tests {
             version_pending(">=999.0", "not yet"),
         ];
         let current = Version::parse("2.1.0").unwrap();
-        resolve_version_candidates(&mut findings, &current, "2.1.0");
+        resolve_version_candidates(&mut findings, &current);
 
         assert_eq!(findings.len(), 1);
-        assert!(matches!(findings[0].kind, scanner::Kind::VersionReached));
         assert_eq!(findings[0].message, "satisfied");
-        match &findings[0].trigger {
-            Trigger::Version {
-                current_version, ..
-            } => assert_eq!(current_version.as_deref(), Some("2.1.0")),
-            Trigger::Date { .. } => panic!("expected Trigger::Version"),
+        match &findings[0].kind {
+            scanner::Kind::VersionReached { written } => assert_eq!(written, ">=2.0"),
+            _ => panic!("expected VersionReached"),
         }
     }
 
@@ -967,16 +960,13 @@ mod tests {
         let findings = [Finding {
             file: "a.rs".to_string(),
             line: 1,
-            kind: scanner::Kind::InvalidTrigger,
-            trigger: Trigger::Version {
+            kind: scanner::Kind::InvalidTrigger {
                 written: "<1.0".to_string(),
-                constraint: None,
-                current_version: None,
             },
             message: "old".to_string(),
         }];
         assert!(!findings
             .iter()
-            .any(|f| matches!(f.kind, scanner::Kind::VersionPending)));
+            .any(|f| matches!(f.kind, scanner::Kind::VersionPending { .. })));
     }
 }
