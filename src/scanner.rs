@@ -248,6 +248,10 @@ pub fn scan_text(file_label: &str, text: &str, ctx: &ScanCtx, findings: &mut Vec
 /// digits); a version span always starts with a comparator character, so
 /// the leading byte alone tells the two apart.
 fn classify(written: &str, ctx: &ScanCtx) -> Option<Kind> {
+    // Non-empty by construction (both span parsers return >=1 byte spans);
+    // indexing stays deliberate so a broken invariant panics loudly instead
+    // of silently reclassifying an empty span.
+    debug_assert!(!written.is_empty());
     if written.as_bytes()[0].is_ascii_digit() {
         match deadline(written) {
             None => Some(Kind::InvalidDate {
