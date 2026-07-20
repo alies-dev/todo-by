@@ -2,7 +2,8 @@
 //! GitHub Actions workflow commands, or JSON Lines.
 
 use crate::date::Date;
-use crate::scanner::{Finding, Kind};
+use crate::scanner::{Finding, Kind, Trigger};
+use crate::version::unsupported_comparator;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Format {
@@ -59,15 +60,73 @@ fn plural_days(n: i64) -> String {
     format!("{n} day{}", if n == 1 { "" } else { "s" })
 }
 
+/// The date-as-written for an Overdue/DueSoon/InvalidDate finding. Panics on
+/// a Version trigger: those three kinds only ever pair with Trigger::Date,
+/// enforced by `scanner::classify`.
+fn date_written(f: &Finding) -> &str {
+    match &f.trigger {
+        Trigger::Date { written, .. } => written,
+        Trigger::Version { .. } => unreachable!("date-kind finding without a Trigger::Date"),
+    }
+}
+
+fn date_deadline(f: &Finding) -> Date {
+    match &f.trigger {
+        Trigger::Date { deadline, .. } => deadline.expect("Overdue/DueSoon always have a deadline"),
+        Trigger::Version { .. } => unreachable!("date-kind finding without a Trigger::Date"),
+    }
+}
+
+/// The constraint as written, and the current version that satisfied it,
+/// for a VersionReached finding.
+fn version_reached_parts(f: &Finding) -> (&str, &str) {
+    match &f.trigger {
+        Trigger::Version {
+            written,
+            current_version,
+            ..
+        } => (
+            written,
+            current_version
+                .as_deref()
+                .expect("VersionReached always carries current_version"),
+        ),
+        Trigger::Date { .. } => unreachable!("VersionReached finding without a Trigger::Version"),
+    }
+}
+
+/// Message for an InvalidTrigger finding: names the unsupported comparator
+/// with a remedy hint when that's the cause, otherwise reports the
+/// constraint as generically invalid (bad version syntax).
+fn invalid_trigger_message(f: &Finding) -> String {
+    match &f.trigger {
+        Trigger::Version { written, .. } => match unsupported_comparator(written) {
+            Some(cmp) => {
+                format!("unsupported comparator {cmp:?} (use >=X: fires once version reaches X)")
+            }
+            None => format!("invalid version constraint {written:?}"),
+        },
+        Trigger::Date { .. } => unreachable!("InvalidTrigger finding without a Trigger::Version"),
+    }
+}
+
 fn render_text(f: &Finding, opts: &RenderOpts) -> String {
     let (phrase, color) = match f.kind {
-        Kind::Overdue => (format!("overdue since {}", f.date), RED),
-        Kind::InvalidDate => (format!("invalid date {}", f.date), RED),
+        Kind::Overdue => (format!("overdue since {}", date_written(f)), RED),
+        Kind::InvalidDate => (format!("invalid date {}", date_written(f)), RED),
         Kind::DueSoon => {
-            let deadline = f.deadline.expect("DueSoon always carries a deadline");
-            let n = days_between(opts.today, deadline);
-            (format!("due in {} ({deadline})", plural_days(n)), YELLOW)
+            let n = days_between(opts.today, date_deadline(f));
+            (
+                format!("due in {} ({})", plural_days(n), date_deadline(f)),
+                YELLOW,
+            )
         }
+        Kind::VersionReached => {
+            let (written, current) = version_reached_parts(f);
+            (format!("version {current} reached ({written})"), RED)
+        }
+        Kind::InvalidTrigger => (invalid_trigger_message(f), RED),
+        Kind::VersionPending => unreachable!("resolved into VersionReached or dropped in main"),
     };
     let phrase = if opts.color {
         format!("{color}{phrase}{RESET}")
@@ -79,16 +138,27 @@ fn render_text(f: &Finding, opts: &RenderOpts) -> String {
 
 fn render_github(f: &Finding, today: Date) -> String {
     let (command, title) = match f.kind {
-        Kind::Overdue => ("error", format!("todo-by overdue since {}", f.date)),
-        Kind::InvalidDate => ("error", format!("todo-by invalid date {}", f.date)),
+        Kind::Overdue => (
+            "error",
+            format!("todo-by overdue since {}", date_written(f)),
+        ),
+        Kind::InvalidDate => ("error", format!("todo-by invalid date {}", date_written(f))),
         Kind::DueSoon => {
-            let deadline = f.deadline.expect("DueSoon always carries a deadline");
-            let n = days_between(today, deadline);
+            let n = days_between(today, date_deadline(f));
             (
                 "warning",
-                format!("todo-by due in {} ({deadline})", plural_days(n)),
+                format!("todo-by due in {} ({})", plural_days(n), date_deadline(f)),
             )
         }
+        Kind::VersionReached => {
+            let (written, current) = version_reached_parts(f);
+            (
+                "error",
+                format!("todo-by version {current} reached ({written})"),
+            )
+        }
+        Kind::InvalidTrigger => ("error", format!("todo-by {}", invalid_trigger_message(f))),
+        Kind::VersionPending => unreachable!("resolved into VersionReached or dropped in main"),
     };
     format!(
         "::{command} file={},line={},title={}::{}",
@@ -102,7 +172,7 @@ fn render_github(f: &Finding, today: Date) -> String {
 fn render_json_finding(f: &Finding, today: Date) -> String {
     match f.kind {
         Kind::Overdue => {
-            let deadline = f.deadline.expect("Overdue always carries a deadline");
+            let deadline = date_deadline(f);
             let days = days_between(deadline, today);
             format!(
                 "{{\"type\":\"finding\",\"kind\":\"overdue\",\"path\":\"{}\",\"line\":{},\
@@ -110,12 +180,12 @@ fn render_json_finding(f: &Finding, today: Date) -> String {
                  \"message\":\"{}\"}}",
                 escape_json(&f.file),
                 f.line,
-                escape_json(&f.date),
+                escape_json(date_written(f)),
                 escape_json(&f.message)
             )
         }
         Kind::DueSoon => {
-            let deadline = f.deadline.expect("DueSoon always carries a deadline");
+            let deadline = date_deadline(f);
             let days = days_between(today, deadline);
             format!(
                 "{{\"type\":\"finding\",\"kind\":\"due-soon\",\"path\":\"{}\",\"line\":{},\
@@ -123,7 +193,7 @@ fn render_json_finding(f: &Finding, today: Date) -> String {
                  \"message\":\"{}\"}}",
                 escape_json(&f.file),
                 f.line,
-                escape_json(&f.date),
+                escape_json(date_written(f)),
                 escape_json(&f.message)
             )
         }
@@ -132,18 +202,52 @@ fn render_json_finding(f: &Finding, today: Date) -> String {
              \"date\":\"{}\",\"deadline\":null,\"message\":\"{}\"}}",
             escape_json(&f.file),
             f.line,
-            escape_json(&f.date),
+            escape_json(date_written(f)),
             escape_json(&f.message)
         ),
+        Kind::VersionReached => {
+            let (written, current) = version_reached_parts(f);
+            format!(
+                "{{\"type\":\"finding\",\"kind\":\"version-reached\",\"path\":\"{}\",\"line\":{},\
+                 \"constraint\":\"{}\",\"current_version\":\"{}\",\"message\":\"{}\"}}",
+                escape_json(&f.file),
+                f.line,
+                escape_json(written),
+                escape_json(current),
+                escape_json(&f.message)
+            )
+        }
+        Kind::InvalidTrigger => {
+            let written = match &f.trigger {
+                Trigger::Version { written, .. } => written,
+                Trigger::Date { .. } => unreachable!("InvalidTrigger without a Trigger::Version"),
+            };
+            format!(
+                "{{\"type\":\"finding\",\"kind\":\"invalid-trigger\",\"path\":\"{}\",\"line\":{},\
+                 \"constraint\":\"{}\",\"message\":\"{}\"}}",
+                escape_json(&f.file),
+                f.line,
+                escape_json(written),
+                escape_json(&f.message)
+            )
+        }
+        Kind::VersionPending => unreachable!("resolved into VersionReached or dropped in main"),
     }
 }
 
-/// Splits findings into error-level (Overdue, InvalidDate) and warning-level
-/// (DueSoon) counts; also drives the exit code in main.
+/// Splits findings into error-level (Overdue, InvalidDate, VersionReached,
+/// InvalidTrigger) and warning-level (DueSoon) counts; also drives the exit
+/// code in main. VersionPending never reaches here: main.rs resolves every
+/// such finding into VersionReached or drops it before rendering.
 pub fn counts(findings: &[Finding]) -> (usize, usize) {
     let errors = findings
         .iter()
-        .filter(|f| matches!(f.kind, Kind::Overdue | Kind::InvalidDate))
+        .filter(|f| {
+            matches!(
+                f.kind,
+                Kind::Overdue | Kind::InvalidDate | Kind::VersionReached | Kind::InvalidTrigger
+            )
+        })
         .count();
     let warnings = findings
         .iter()
@@ -205,7 +309,8 @@ fn escape_json(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scanner::{Finding, Kind};
+    use crate::scanner::{Finding, Kind, Trigger};
+    use crate::version::Constraint;
 
     fn date(s: &str) -> Date {
         Date::parse_full(s).unwrap()
@@ -216,8 +321,10 @@ mod tests {
             file: "src/lib.rs".to_string(),
             line: 12,
             kind: Kind::Overdue,
-            date: "2000-01-01".to_string(),
-            deadline: Some(date("2000-01-01")),
+            trigger: Trigger::Date {
+                written: "2000-01-01".to_string(),
+                deadline: Some(date("2000-01-01")),
+            },
             message: "remove workaround".to_string(),
         }
     }
@@ -227,8 +334,10 @@ mod tests {
             file: "src/lib.rs".to_string(),
             line: 20,
             kind: Kind::DueSoon,
-            date: "2000-01-10".to_string(),
-            deadline: Some(date("2000-01-10")),
+            trigger: Trigger::Date {
+                written: "2000-01-10".to_string(),
+                deadline: Some(date("2000-01-10")),
+            },
             message: "drop feature flag".to_string(),
         }
     }
@@ -238,9 +347,53 @@ mod tests {
             file: "src/lib.rs".to_string(),
             line: 30,
             kind: Kind::InvalidDate,
-            date: "2000-02-30".to_string(),
-            deadline: None,
+            trigger: Trigger::Date {
+                written: "2000-02-30".to_string(),
+                deadline: None,
+            },
             message: "typo'd date".to_string(),
+        }
+    }
+
+    fn version_reached() -> Finding {
+        Finding {
+            file: "src/api.rs".to_string(),
+            line: 30,
+            kind: Kind::VersionReached,
+            trigger: Trigger::Version {
+                written: ">=2.0".to_string(),
+                constraint: Constraint::parse(">=2.0"),
+                current_version: Some("2.1.0".to_string()),
+            },
+            message: "drop legacy endpoint".to_string(),
+        }
+    }
+
+    fn invalid_version_syntax() -> Finding {
+        Finding {
+            file: "src/api.rs".to_string(),
+            line: 31,
+            kind: Kind::InvalidTrigger,
+            trigger: Trigger::Version {
+                written: ">=2.x".to_string(),
+                constraint: None,
+                current_version: None,
+            },
+            message: "remove thing".to_string(),
+        }
+    }
+
+    fn unsupported_comparator_finding() -> Finding {
+        Finding {
+            file: "src/api.rs".to_string(),
+            line: 32,
+            kind: Kind::InvalidTrigger,
+            trigger: Trigger::Version {
+                written: "<1.0".to_string(),
+                constraint: None,
+                current_version: None,
+            },
+            message: "old behavior".to_string(),
         }
     }
 
@@ -279,11 +432,35 @@ mod tests {
         );
 
         let mut f = due_soon();
-        f.deadline = Some(date("2000-01-06"));
-        f.date = "2000-01-06".to_string();
+        f.trigger = Trigger::Date {
+            written: "2000-01-06".to_string(),
+            deadline: Some(date("2000-01-06")),
+        };
         assert_eq!(
             render_finding(&f, &o),
             "src/lib.rs:20: due in 1 day (2000-01-06): drop feature flag"
+        );
+    }
+
+    #[test]
+    fn text_version_reached_line() {
+        let o = opts(Format::Text, false);
+        assert_eq!(
+            render_finding(&version_reached(), &o),
+            "src/api.rs:30: version 2.1.0 reached (>=2.0): drop legacy endpoint"
+        );
+    }
+
+    #[test]
+    fn text_invalid_trigger_lines() {
+        let o = opts(Format::Text, false);
+        assert_eq!(
+            render_finding(&invalid_version_syntax(), &o),
+            "src/api.rs:31: invalid version constraint \">=2.x\": remove thing"
+        );
+        assert_eq!(
+            render_finding(&unsupported_comparator_finding(), &o),
+            "src/api.rs:32: unsupported comparator \"<\" (use >=X: fires once version reaches X): old behavior"
         );
     }
 
@@ -324,6 +501,10 @@ mod tests {
             summary_text(&[overdue(), invalid(), due_soon(), due_soon()]),
             "2 findings, 2 warnings"
         );
+        assert_eq!(
+            summary_text(&[version_reached(), invalid_version_syntax()]),
+            "2 findings"
+        );
     }
 
     #[test]
@@ -346,6 +527,25 @@ mod tests {
         assert_eq!(
             line,
             "::warning file=src/lib.rs,line=20,title=todo-by due in 5 days (2000-01-10)::drop feature flag"
+        );
+    }
+
+    #[test]
+    fn github_version_reached_and_invalid_trigger_emit_error() {
+        let line = render_finding(&version_reached(), &opts(Format::Github, false));
+        assert_eq!(
+            line,
+            "::error file=src/api.rs,line=30,title=todo-by version 2.1.0 reached (>=2.0)::drop legacy endpoint"
+        );
+        let line = render_finding(
+            &unsupported_comparator_finding(),
+            &opts(Format::Github, false),
+        );
+        assert_eq!(
+            // The hint's own ':' goes through gh_escape_property like any
+            // other title content, becoming %3A.
+            line,
+            "::error file=src/api.rs,line=32,title=todo-by unsupported comparator \"<\" (use >=X%3A fires once version reaches X)::old behavior"
         );
     }
 
@@ -377,9 +577,35 @@ mod tests {
     }
 
     #[test]
+    fn json_version_reached_shape() {
+        let line = render_finding(&version_reached(), &opts(Format::Json, false));
+        assert_eq!(
+            line,
+            "{\"type\":\"finding\",\"kind\":\"version-reached\",\"path\":\"src/api.rs\",\"line\":30,\"constraint\":\">=2.0\",\"current_version\":\"2.1.0\",\"message\":\"drop legacy endpoint\"}"
+        );
+    }
+
+    #[test]
+    fn json_invalid_trigger_shape_has_no_current_version() {
+        let line = render_finding(&invalid_version_syntax(), &opts(Format::Json, false));
+        assert_eq!(
+            line,
+            "{\"type\":\"finding\",\"kind\":\"invalid-trigger\",\"path\":\"src/api.rs\",\"line\":31,\"constraint\":\">=2.x\",\"message\":\"remove thing\"}"
+        );
+    }
+
+    #[test]
     fn json_summary_counts_errors_and_warnings_separately() {
         assert_eq!(
             summary_json(&[overdue(), invalid(), due_soon()]),
+            "{\"type\":\"summary\",\"findings\":2,\"warnings\":1}"
+        );
+        assert_eq!(
+            summary_json(&[
+                version_reached(),
+                unsupported_comparator_finding(),
+                due_soon()
+            ]),
             "{\"type\":\"summary\",\"findings\":2,\"warnings\":1}"
         );
         assert_eq!(
