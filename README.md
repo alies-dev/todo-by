@@ -179,7 +179,7 @@ version-cmd = "jq -r .version package.json"
 - `warn` (integer): same as `--warn`.
 - `exclude` (array of strings): gitignore-style globs excluded in addition to `.gitignore`. Globs are matched relative to the directory where `todo-by` runs, like ripgrep's `--glob`.
 - `tags` (array of strings): tags to match, case-insensitive. Setting this replaces the default (`todo-by`) entirely rather than adding to it.
-- `version-cmd` (string): a shell command whose trimmed stdout is the current version, used to resolve version triggers (see [Versions](#versions)). It runs via `sh -c` (on Windows, `cmd /C`).
+- `version-cmd` (string): a shell command whose trimmed stdout is the current version, used to resolve version triggers (see [Versions](#versions)). It runs via `sh -c` (on Windows, `cmd /C`) in the config file's directory, so relative paths keep working when `todo-by` is invoked from a subdirectory.
 
 Precedence: command line flags win, then the `TODO_BY_FORMAT` / `TODO_BY_WARN` / `TODO_BY_VERSION` environment variables, then the config file.
 

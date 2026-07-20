@@ -252,24 +252,41 @@ fn choose_version_source(
 /// Produces the raw current-version string for the chosen source, running a
 /// shell command or `git` only for the tier that actually won (laziness
 /// lives one level up: `main` only calls this when the scan produced a
-/// version candidate at all).
-fn resolve_current_version(source: VersionSource, invocation_dir: &Path) -> Result<String, String> {
+/// version candidate at all). `run_dir` is the config file's directory when
+/// one was loaded (see [`version_run_dir`]), so a relative path inside
+/// `version-cmd` resolves against the file that declared it, not against
+/// wherever `todo-by` happened to be invoked.
+fn resolve_current_version(source: VersionSource, run_dir: &Path) -> Result<String, String> {
     match source {
         VersionSource::Flag(v) | VersionSource::Env(v) => Ok(v),
-        VersionSource::ConfigCmd(cmd) => run_version_cmd(&cmd),
-        VersionSource::GitDefault => run_git_describe(invocation_dir),
+        VersionSource::ConfigCmd(cmd) => run_version_cmd(&cmd, run_dir),
+        VersionSource::GitDefault => run_git_describe(run_dir),
     }
 }
 
-fn run_version_cmd(cmd: &str) -> Result<String, String> {
+/// Directory version resolution subprocesses run in: the loaded config
+/// file's directory, falling back to the invocation directory when no
+/// config file exists. Anchoring at the config file keeps `version-cmd`
+/// working from any subdirectory (npm-script semantics); git describe is
+/// indifferent since git walks upward itself.
+fn version_run_dir<'a>(config_source: Option<&'a Path>, start_dir: &'a Path) -> &'a Path {
+    config_source.and_then(Path::parent).unwrap_or(start_dir)
+}
+
+fn run_version_cmd(cmd: &str, run_dir: &Path) -> Result<String, String> {
     // `sh` isn't a given on Windows runners/installs; `cmd` is.
     let output = if cfg!(windows) {
         std::process::Command::new("cmd")
             .arg("/C")
             .arg(cmd)
+            .current_dir(run_dir)
             .output()
     } else {
-        std::process::Command::new("sh").arg("-c").arg(cmd).output()
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(run_dir)
+            .output()
     }
     .map_err(|err| format!("version-cmd {cmd:?} failed to run: {err}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -289,11 +306,11 @@ fn run_version_cmd(cmd: &str) -> Result<String, String> {
 /// Errors only when actually called: `main` only reaches this when the
 /// scan produced a version candidate, so a repo with no version tags in
 /// comments never runs git and never fails because it has no git tags.
-fn run_git_describe(invocation_dir: &Path) -> Result<String, String> {
+fn run_git_describe(run_dir: &Path) -> Result<String, String> {
     const REMEDY: &str = "set version-cmd in todo-by.toml or pass --current-version";
     let output = std::process::Command::new("git")
         .args(["describe", "--tags", "--abbrev=0"])
-        .current_dir(invocation_dir)
+        .current_dir(run_dir)
         .output()
         .map_err(|err| {
             format!(
@@ -638,7 +655,8 @@ fn main() -> ExitCode {
             cfg.version_cmd.as_deref(),
         );
         let label = source.label();
-        let raw = match resolve_current_version(source, &start_dir) {
+        let run_dir = version_run_dir(cfg.source.as_deref(), &start_dir);
+        let raw = match resolve_current_version(source, run_dir) {
             Ok(v) => v,
             Err(err) => {
                 eprintln!("todo-by: {err}");
@@ -920,6 +938,16 @@ mod tests {
             VersionSource::GitDefault.label(),
             "git describe --tags --abbrev=0"
         );
+    }
+
+    #[test]
+    fn version_run_dir_prefers_config_dir_over_start_dir() {
+        let start = Path::new("/work/repo/src");
+        assert_eq!(
+            version_run_dir(Some(Path::new("/work/repo/todo-by.toml")), start),
+            Path::new("/work/repo")
+        );
+        assert_eq!(version_run_dir(None, start), start);
     }
 
     fn version_pending(written: &str, message: &str) -> Finding {
