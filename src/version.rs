@@ -18,16 +18,18 @@ impl Version {
     /// dot-separated ASCII-digit components each fitting a `u64`.
     ///
     /// Rejects rather than degrades on anything ambiguous: an empty
-    /// component (`2..0`, `.2.0`), an empty pre-release after `-` (`2.0-`),
-    /// or an empty build after `+` (`2.0+`) all return `None` instead of
-    /// silently parsing as a shorter, different version. That mirrors
+    /// component (`2..0`, `.2.0`), an empty pre-release or build after the
+    /// separator (`2.0-`, `2.0+`), or an empty dot-separated identifier
+    /// inside either (`2.0-alpha..1`, `2.0+build..1`, `2.0-alpha.`, all
+    /// invalid per semver) return `None` instead of silently parsing as a
+    /// shorter, different version. That mirrors
     /// `date::deadline`'s stance on malformed tokens: a typo should surface
     /// as an invalid trigger, not quietly mean something else.
     pub fn parse(s: &str) -> Option<Self> {
         let s = s.strip_prefix(['v', 'V']).unwrap_or(s);
         let core_and_pre = match s.split_once('+') {
             Some((head, build)) => {
-                if build.is_empty() {
+                if build.split('.').any(str::is_empty) {
                     return None;
                 }
                 head
@@ -36,7 +38,7 @@ impl Version {
         };
         let (core, pre) = match core_and_pre.split_once('-') {
             Some((core, pre)) => {
-                if pre.is_empty() {
+                if pre.split('.').any(str::is_empty) {
                     return None;
                 }
                 (core, Some(pre.to_string()))
@@ -231,6 +233,16 @@ mod tests {
         assert_eq!(Version::parse("2.0-"), None);
         assert_eq!(Version::parse("2.0+"), None);
         assert_eq!(Version::parse("2.0-rc.1+"), None);
+    }
+
+    #[test]
+    fn rejects_empty_identifiers_inside_pre_and_build() {
+        assert_eq!(Version::parse("1.0.0-alpha..1"), None);
+        assert_eq!(Version::parse("1.0.0-alpha."), None);
+        assert_eq!(Version::parse("1.0.0-.alpha"), None);
+        assert_eq!(Version::parse("1.0.0+build..1"), None);
+        assert_eq!(Version::parse("1.0.0+build."), None);
+        assert!(Version::parse("1.0.0-alpha.1+build.1").is_some());
     }
 
     #[test]
