@@ -301,8 +301,16 @@ fn run_git_describe(invocation_dir: &Path) -> Result<String, String> {
             )
         })?;
     if !output.status.success() {
+        // git's own stderr distinguishes "no tags" from e.g. "not a git
+        // repository"; hardcoding one cause here would misreport the others.
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = if stderr.is_empty() {
+            "found no tags".to_string()
+        } else {
+            stderr
+        };
         return Err(format!(
-            "could not determine current version: git describe --tags --abbrev=0 found no tags; {REMEDY}"
+            "could not determine current version: git describe --tags --abbrev=0 failed ({detail}); {REMEDY}"
         ));
     }
     let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();

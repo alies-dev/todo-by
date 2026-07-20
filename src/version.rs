@@ -109,15 +109,15 @@ fn compare_pre(a: &str, b: &str) -> Ordering {
     let mut a_ids = a.split('.');
     let mut b_ids = b.split('.');
     loop {
-        return match (a_ids.next(), b_ids.next()) {
-            (None, None) => Ordering::Equal,
-            (None, Some(_)) => Ordering::Less,
-            (Some(_), None) => Ordering::Greater,
+        match (a_ids.next(), b_ids.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
             (Some(x), Some(y)) => match compare_pre_identifier(x, y) {
-                Ordering::Equal => continue,
-                ord => ord,
+                Ordering::Equal => {}
+                ord => return ord,
             },
-        };
+        }
     }
 }
 
