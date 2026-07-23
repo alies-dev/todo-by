@@ -60,17 +60,19 @@ pub struct ScanCtx<'a> {
     pub tags: &'a [String],
 }
 
-/// Extracts `(date, message)` from a line with a matching tag, case-insensitive:
-/// `@todo-by 2999-12-31 message`, `TODO-BY: 2999-09 - message`, etc. Tries
-/// `tags` in order at each scan position; the first tag that yields a full
-/// match (tag text, word boundary, and a date span) wins.
+/// Extracts `(date, message)` for the first matching tag in `line`,
+/// case-insensitive: `@todo-by 2999-12-31 message`, `TODO-BY: 2999-09 -
+/// message`, etc. A thin wrapper over [`match_line_from`] starting at
+/// position 0, kept so existing single-trigger tests don't need to change
+/// shape.
 #[cfg(test)]
 pub fn match_line<'a>(line: &'a str, tags: &[String]) -> Option<(&'a str, String)> {
-    match_line_in(line, tags, &tag_firsts(tags))
+    match_line_from(line, 0, tags, &tag_firsts(tags))
+        .map(|(written, message, _end)| (written, message))
 }
 
 /// Lowercased first byte of each tag: the per-byte fast-reject set for
-/// [`match_line_in`]. Built once per file, not per line or per byte.
+/// [`match_line_from`]. Built once per file, not per line or per byte.
 fn tag_firsts(tags: &[String]) -> Vec<u8> {
     tags.iter()
         .filter_map(|t| t.as_bytes().first())
@@ -78,10 +80,28 @@ fn tag_firsts(tags: &[String]) -> Vec<u8> {
         .collect()
 }
 
-fn match_line_in<'a>(line: &'a str, tags: &[String], firsts: &[u8]) -> Option<(&'a str, String)> {
+/// Finds the next matching tag in `line` at or after absolute byte offset
+/// `start`, returning `(written span, message, end)` where `end` is the
+/// absolute offset just past the consumed trigger span. Tries `tags` in
+/// order at each scan position; the first tag that yields a full match
+/// (tag text, word boundary, and a date or version span) wins.
+///
+/// `start` is always an offset into the ORIGINAL `line`, never into a
+/// re-sliced suffix: `scan_text` resumes a line by calling this again with
+/// a later `start`, not by slicing `line` down to `&line[start..]`. That
+/// distinction matters because the word-boundary check below reads
+/// `bytes[i - 1]`, the byte immediately before a candidate match; slicing
+/// would lose that left-context at the slice boundary and could let a
+/// second trigger match mid-identifier right after the first one ends.
+fn match_line_from<'a>(
+    line: &'a str,
+    start: usize,
+    tags: &[String],
+    firsts: &[u8],
+) -> Option<(&'a str, String, usize)> {
     let bytes = line.as_bytes();
     let n = bytes.len();
-    let mut i = 0;
+    let mut i = start;
     while i < n {
         // Fast reject first: this loop runs for every byte of every scanned
         // file, so nothing heavier than a first-byte comparison may sit on
@@ -123,10 +143,10 @@ fn match_line_in<'a>(line: &'a str, tags: &[String], firsts: &[u8]) -> Option<(&
                 continue;
             }
             if let Some(end) = parse_date_span(bytes, j) {
-                return Some((&line[j..end], clean_message(&line[end..])));
+                return Some((&line[j..end], clean_message(&line[end..]), end));
             }
             if let Some(end) = parse_version_span(bytes, j) {
-                return Some((&line[j..end], clean_message(&line[end..])));
+                return Some((&line[j..end], clean_message(&line[end..]), end));
             }
         }
         // Advancing by one byte is safe: positions inside a just-rejected
@@ -141,7 +161,9 @@ fn match_line_in<'a>(line: &'a str, tags: &[String], firsts: &[u8]) -> Option<(&
 /// disqualifies the tag), then consumes the whole contiguous token (ASCII
 /// alphanumerics, '-', '/', '.') so malformed dates like `2026/01/05`,
 /// `2026-`, or `2026-09x` reach `date::deadline` intact and are reported
-/// invalid; truncating to a valid prefix would silently postpone the deadline.
+/// invalid; truncating to a valid prefix would silently postpone the
+/// deadline. `trim_trailing_html_comment_dashes` then excludes an
+/// immediately-following HTML comment closer's two hyphens from the token.
 fn parse_date_span(bytes: &[u8], start: usize) -> Option<usize> {
     let mut j = start;
     for _ in 0..4 {
@@ -159,7 +181,7 @@ fn parse_date_span(bytes: &[u8], start: usize) -> Option<usize> {
     {
         j += 1;
     }
-    Some(j)
+    Some(trim_trailing_html_comment_dashes(bytes, j))
 }
 
 /// Returns the end of the `comparator + version` token at `start`, or None
@@ -173,6 +195,9 @@ fn parse_date_span(bytes: &[u8], start: usize) -> Option<usize> {
 /// Once a comparator commits, the version part is consumed whole (same
 /// rationale as dates): `>=2.x` must reach `version::Constraint::parse`
 /// intact and be reported invalid, not truncated to a valid-looking `>=2`.
+/// `_` is included alongside `.`, `-`, `+` in the consumed charset for the
+/// same reason: `>=2.0_rc.1` must reach the validator whole, not get cut
+/// to a valid-looking `>=2.0`.
 fn parse_version_span(bytes: &[u8], start: usize) -> Option<usize> {
     let cmp_len = COMPARATORS
         .iter()
@@ -187,11 +212,28 @@ fn parse_version_span(bytes: &[u8], start: usize) -> Option<usize> {
     }
     while bytes
         .get(j)
-        .is_some_and(|&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+'))
+        .is_some_and(|&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+' | b'_'))
     {
         j += 1;
     }
-    Some(j)
+    Some(trim_trailing_html_comment_dashes(bytes, j))
+}
+
+/// Both `-` and `.` sit in the date and version charsets above, so a
+/// trigger written just before an HTML comment closer (`<!-- todo-by
+/// 2026-09-01--> ` or `<!-- todo-by >=2.0-->`, no space before `-->`) would
+/// otherwise eat the closer's two hyphens into the span itself, producing
+/// a bogus trailing `--` (an InvalidDate false positive, or a version
+/// pre-release of `-`). If the just-consumed span ends with `--` and the
+/// very next byte is `>`, back `end` off by 2 so those hyphens stay
+/// outside the trigger; a genuine trailing `--` NOT followed by `>` (real
+/// content, not a comment closer) is left untouched.
+fn trim_trailing_html_comment_dashes(bytes: &[u8], end: usize) -> usize {
+    if end >= 2 && &bytes[end - 2..end] == b"--" && bytes.get(end) == Some(&b'>') {
+        end - 2
+    } else {
+        end
+    }
 }
 
 fn clean_message(rest: &str) -> String {
@@ -227,18 +269,23 @@ pub fn scan_bytes(file_label: &str, content: &[u8], ctx: &ScanCtx, findings: &mu
 pub fn scan_text(file_label: &str, text: &str, ctx: &ScanCtx, findings: &mut Vec<Finding>) {
     let firsts = tag_firsts(ctx.tags);
     for (idx, line) in text.lines().enumerate() {
-        let Some((written, message)) = match_line_in(line, ctx.tags, &firsts) else {
-            continue;
-        };
-        let Some(kind) = classify(written, ctx) else {
-            continue;
-        };
-        findings.push(Finding {
-            file: file_label.to_string(),
-            line: idx + 1,
-            kind,
-            message,
-        });
+        // Every trigger on the line is reported, not just the first: resume
+        // right after each match's span rather than stopping there. An
+        // earlier trigger's message is the untouched rest of the line, so
+        // it may include a later trigger's text verbatim; that's fine, the
+        // later trigger still gets its own finding.
+        let mut pos = 0;
+        while let Some((written, message, end)) = match_line_from(line, pos, ctx.tags, &firsts) {
+            if let Some(kind) = classify(written, ctx) {
+                findings.push(Finding {
+                    file: file_label.to_string(),
+                    line: idx + 1,
+                    kind,
+                    message,
+                });
+            }
+            pos = end;
+        }
     }
 }
 
@@ -661,5 +708,118 @@ mod tests {
         );
         assert_eq!(findings.len(), 1);
         assert!(matches!(findings[0].kind, Kind::VersionPending { .. }));
+    }
+
+    #[test]
+    fn a_line_with_a_date_trigger_then_a_version_trigger_reports_both() {
+        let todo_by_tags = todo_by();
+        let today = Date::new(2999, 1, 1).unwrap();
+        let c = ctx(today, None, &todo_by_tags);
+        let ge = ">=2.0";
+        let line = format!("// todo-by 2998-01-01 overdue, todo-by {ge} drop legacy");
+        let mut findings = Vec::new();
+        scan_text("f", &line, &c, &mut findings);
+        assert_eq!(findings.len(), 2, "{line:?}");
+        assert!(matches!(findings[0].kind, Kind::Overdue { .. }));
+        assert!(matches!(findings[1].kind, Kind::VersionPending { .. }));
+    }
+
+    #[test]
+    fn version_trigger_does_not_shadow_a_later_overdue_date_on_the_same_line() {
+        // Regression: scanning used to stop after a line's first trigger,
+        // silently dropping everything after it. A version candidate
+        // "shadowed" a later overdue date this way; both must be reported.
+        let todo_by_tags = todo_by();
+        let today = Date::new(2999, 1, 1).unwrap();
+        let c = ctx(today, None, &todo_by_tags);
+        let ge = ">=999.0"; // "unsatisfied" once main.rs resolves it; the scanner just emits VersionPending
+        let line = format!("// todo-by {ge} not yet, todo-by 2998-01-01 also overdue");
+        let mut findings = Vec::new();
+        scan_text("f", &line, &c, &mut findings);
+        assert_eq!(findings.len(), 2, "{line:?}");
+        assert!(matches!(findings[0].kind, Kind::VersionPending { .. }));
+        assert!(matches!(findings[1].kind, Kind::Overdue { .. }));
+        // Acceptable: the earlier trigger's message is the untouched rest
+        // of the line, so it includes the later trigger's text verbatim.
+        assert_eq!(
+            findings[0].message,
+            "not yet, todo-by 2998-01-01 also overdue"
+        );
+    }
+
+    #[test]
+    fn underscore_in_version_span_is_consumed_whole_and_reported_invalid() {
+        let todo_by_tags = todo_by();
+        let today = Date::new(2999, 1, 1).unwrap();
+        let c = ctx(today, None, &todo_by_tags);
+        let bad = ">=2.0_rc.1";
+        let line = format!("// todo-by {bad} typo");
+        let mut findings = Vec::new();
+        scan_text("f", &line, &c, &mut findings);
+        assert_eq!(findings.len(), 1, "{line:?}");
+        match &findings[0].kind {
+            Kind::InvalidTrigger { written } => assert_eq!(written, bad),
+            _ => panic!("expected InvalidTrigger for {line:?}"),
+        }
+    }
+
+    #[test]
+    fn html_comment_closer_does_not_corrupt_a_date_span() {
+        // Before the backoff, the closer's two hyphens got swallowed into
+        // the date span ("2998-09-01--"), which failed to parse and
+        // misreported as InvalidDate instead of the real (overdue) date.
+        let todo_by_tags = todo_by();
+        let today = Date::new(2999, 1, 1).unwrap();
+        let c = ctx(today, None, &todo_by_tags);
+        let mut findings = Vec::new();
+        scan_text("f", "<!-- todo-by 2998-09-01-->", &c, &mut findings);
+        assert_eq!(findings.len(), 1);
+        match &findings[0].kind {
+            Kind::Overdue { written, deadline } => {
+                assert_eq!(written, "2998-09-01");
+                assert_eq!(*deadline, Date::new(2998, 9, 1).unwrap());
+            }
+            _ => panic!("expected Overdue, the closer must not corrupt the date span"),
+        }
+    }
+
+    #[test]
+    fn html_comment_closer_does_not_corrupt_a_version_span() {
+        let todo_by_tags = todo_by();
+        let today = Date::new(2999, 1, 1).unwrap();
+        let c = ctx(today, None, &todo_by_tags);
+        let mut findings = Vec::new();
+        scan_text("f", "<!-- todo-by >=2.0-->", &c, &mut findings);
+        assert_eq!(findings.len(), 1);
+        match &findings[0].kind {
+            Kind::VersionPending { written, .. } => assert_eq!(written, ">=2.0"),
+            _ => panic!("expected VersionPending, the closer must not corrupt the version span"),
+        }
+    }
+
+    #[test]
+    fn trailing_double_hyphen_without_a_close_angle_is_still_consumed() {
+        // Genuine content, not a comment closer (no '>' right after): must
+        // stay part of the span and be rejected as malformed, not silently
+        // trimmed the way a real "-->" closer is. Built at runtime: this
+        // is an InvalidDate regardless of "today", so a literal here would
+        // flag the repo's own dogfood scan.
+        let todo_by_tags = todo_by();
+        let bad = "2026-09-01--";
+        let line = format!("// todo-by {bad} typo");
+        let (date, msg) = match_line(&line, &todo_by_tags).unwrap();
+        assert_eq!(date, bad);
+        assert_eq!(msg, "typo");
+        assert_eq!(crate::date::deadline(date), None);
+    }
+
+    #[test]
+    fn trailing_double_hyphen_without_a_close_angle_is_still_consumed_in_version_span() {
+        let todo_by_tags = todo_by();
+        let bad = ">=2.0--";
+        let line = format!("// todo-by {bad} typo");
+        let (written, msg) = match_line(&line, &todo_by_tags).unwrap();
+        assert_eq!(written, bad);
+        assert_eq!(msg, "typo");
     }
 }

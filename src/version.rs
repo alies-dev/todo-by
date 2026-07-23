@@ -14,23 +14,34 @@ pub struct Version {
     pre: Option<String>,
 }
 
+/// A single dot-separated pre-release or build identifier must be
+/// non-empty and use only semver's identifier charset (ASCII
+/// alphanumerics and `-`). Rejecting anything else (an underscore, a
+/// stray `+`) means a typo surfaces as an invalid trigger instead of
+/// silently parsing into a different, unintended version.
+fn is_valid_identifier(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
 impl Version {
     /// Parses `[v|V]<core>[-<pre>][+<build>]`, where `<core>` is 1 to 3
     /// dot-separated ASCII-digit components each fitting a `u64`.
     ///
     /// Rejects rather than degrades on anything ambiguous: an empty
     /// component (`2..0`, `.2.0`), an empty pre-release or build after the
-    /// separator (`2.0-`, `2.0+`), or an empty dot-separated identifier
-    /// inside either (`2.0-alpha..1`, `2.0+build..1`, `2.0-alpha.`, all
-    /// invalid per semver) return `None` instead of silently parsing as a
-    /// shorter, different version. That mirrors
+    /// separator (`2.0-`, `2.0+`), an empty dot-separated identifier inside
+    /// either (`2.0-alpha..1`, `2.0+build..1`, `2.0-alpha.`), or an
+    /// identifier containing anything outside ASCII alphanumerics and `-`
+    /// (`2.0-rc_1`; `2.0+build+other`, where the second `+` lands inside
+    /// the build identifiers) all return `None` instead of silently
+    /// parsing as a shorter, different version. That mirrors
     /// `date::deadline`'s stance on malformed tokens: a typo should surface
     /// as an invalid trigger, not quietly mean something else.
     pub fn parse(s: &str) -> Option<Self> {
         let s = s.strip_prefix(['v', 'V']).unwrap_or(s);
         let core_and_pre = match s.split_once('+') {
             Some((head, build)) => {
-                if build.split('.').any(str::is_empty) {
+                if !build.split('.').all(is_valid_identifier) {
                     return None;
                 }
                 head
@@ -39,7 +50,7 @@ impl Version {
         };
         let (core, pre) = match core_and_pre.split_once('-') {
             Some((core, pre)) => {
-                if pre.split('.').any(str::is_empty) {
+                if !pre.split('.').all(is_valid_identifier) {
                     return None;
                 }
                 (core, Some(pre.to_string()))
@@ -146,18 +157,30 @@ fn compare_pre(a: &str, b: &str) -> Ordering {
 }
 
 fn compare_pre_identifier(a: &str, b: &str) -> Ordering {
-    let a_num = is_numeric_identifier(a)
-        .then(|| a.parse::<u64>().ok())
-        .flatten();
-    let b_num = is_numeric_identifier(b)
-        .then(|| b.parse::<u64>().ok())
-        .flatten();
-    match (a_num, b_num) {
-        (Some(x), Some(y)) => x.cmp(&y),
-        (Some(_), None) => Ordering::Less,
-        (None, Some(_)) => Ordering::Greater,
-        (None, None) => a.cmp(b),
+    match (is_numeric_identifier(a), is_numeric_identifier(b)) {
+        (true, true) => compare_numeric_identifiers(a, b),
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (false, false) => a.cmp(b),
     }
+}
+
+/// Compares two all-digit identifiers as arbitrary-precision numbers,
+/// without parsing into a `u64`: an identifier can legally be longer than
+/// 20 digits (nothing in the grammar caps it), so parsing would overflow
+/// and silently fall back to lexicographic order, which disagrees with
+/// numeric order for identifiers of different lengths (`"9...9"`, 22
+/// nines, is numerically less than `"1" + "0"*22`, but sorts after it
+/// byte-wise). Stripping leading zeros first turns the comparison into
+/// (length, then lexicographic): equal-length digit strings with no
+/// leading zeros compare the same both ways, and stripping preserves the
+/// documented leading-zero equality (`01` == `1`, since both strip to
+/// `1`; `0` strips to the empty string, which still compares correctly
+/// against another all-zero identifier or against `1`).
+fn compare_numeric_identifiers(a: &str, b: &str) -> Ordering {
+    let a = a.trim_start_matches('0');
+    let b = b.trim_start_matches('0');
+    (a.len(), a).cmp(&(b.len(), b))
 }
 
 /// Leading zeroes are accepted and compared numerically (`01` == `1`):
@@ -288,6 +311,21 @@ mod tests {
     }
 
     #[test]
+    fn pre_and_build_identifiers_reject_characters_outside_the_semver_charset() {
+        assert_eq!(Version::parse("1.0.0-rc_1"), None, "underscore not allowed");
+        assert_eq!(
+            Version::parse("1.0.0+build+other"),
+            None,
+            "second '+' lands inside the build identifiers"
+        );
+    }
+
+    #[test]
+    fn hyphenated_pre_release_identifier_is_legal() {
+        assert!(Version::parse("1.0.0-rc-1").is_some());
+    }
+
+    #[test]
     fn build_metadata_is_parsed_and_ignored_for_ordering() {
         assert_eq!(v("2.0.0+build.5"), v("2.0.0"));
         assert!(Version::parse("2.0.0-rc.1+build.5").is_some());
@@ -331,6 +369,22 @@ mod tests {
         // outright, but this parser treats "01" as the number 1.
         assert_eq!(v("1.0.0-alpha.01"), v("1.0.0-alpha.1"));
         assert!(v("1.0.0-alpha.010") < v("1.0.0-alpha.11"));
+    }
+
+    #[test]
+    fn numeric_pre_release_identifiers_beyond_u64_compare_correctly() {
+        // Both identifiers exceed u64::MAX's 20 digits, so naive u64
+        // parsing would overflow. A lexicographic fallback disagrees with
+        // numeric order here: '9' > '1' byte-wise, even though the
+        // 23-digit number is numerically larger than the 22-digit one.
+        let nines = "9".repeat(22);
+        let one_and_zeros = format!("1{}", "0".repeat(22));
+        assert!(nines.parse::<u64>().is_err(), "fixture must overflow u64");
+        assert!(
+            one_and_zeros.parse::<u64>().is_err(),
+            "fixture must overflow u64"
+        );
+        assert!(v(&format!("1.0.0-{nines}")) < v(&format!("1.0.0-{one_and_zeros}")));
     }
 
     #[test]

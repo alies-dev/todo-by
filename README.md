@@ -125,8 +125,8 @@ Unlike dates, `--warn` never applies to version triggers: a future version isn't
 
 1. `--current-version <X>` on the command line.
 2. The `TODO_BY_VERSION` environment variable.
-3. The `version-cmd` config key: a shell command whose trimmed stdout is the version, for example `version-cmd = "jq -r .version package.json"`.
-4. `git describe --tags --abbrev=0`, with a leading `v` stripped.
+3. The `version-cmd` config key: a shell command whose trimmed stdout is the version, for example `version-cmd = "jq -r .version package.json"`. It runs in the config file's own directory, so a relative path (like `package.json` above) resolves against the file that declared it, not against wherever `todo-by` was invoked.
+4. `git describe --tags --abbrev=0`, with a leading `v` stripped. This runs in the directory `todo-by` was invoked in, not the config file's directory: git already walks upward on its own to find the repository, and a config file discovered above the actual repository (a monorepo layout, for example) would otherwise point git at the wrong one.
 
 `version-cmd` runs a shell command taken from the config file, so treat it the same as any other command a repository can make CI run, and only enable it in repositories you trust. It executes only when the scan actually finds a version tag, never on every run.
 

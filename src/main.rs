@@ -252,23 +252,39 @@ fn choose_version_source(
 /// Produces the raw current-version string for the chosen source, running a
 /// shell command or `git` only for the tier that actually won (laziness
 /// lives one level up: `main` only calls this when the scan produced a
-/// version candidate at all). `run_dir` is the config file's directory when
-/// one was loaded (see [`version_run_dir`]), so a relative path inside
-/// `version-cmd` resolves against the file that declared it, not against
-/// wherever `todo-by` happened to be invoked.
-fn resolve_current_version(source: VersionSource, run_dir: &Path) -> Result<String, String> {
+/// version candidate at all).
+///
+/// The two directories are NOT interchangeable: `config_run_dir` (see
+/// [`version_run_dir`]) is the config file's directory, so a relative path
+/// inside `version-cmd` resolves against the file that declared it. But
+/// `git describe`'s default MUST run in `invocation_dir` (where `todo-by`
+/// was actually invoked), not the config directory: config discovery walks
+/// upward from the invocation directory looking for `todo-by.toml`, so the
+/// config file can legitimately live above the repository itself (e.g. a
+/// monorepo config at `/work/todo-by.toml` with the repo at
+/// `/work/project`). Anchoring git there would make it describe the wrong
+/// repository, or fail outright if `/work` isn't a repository at all.
+fn resolve_current_version(
+    source: VersionSource,
+    config_run_dir: &Path,
+    invocation_dir: &Path,
+) -> Result<String, String> {
     match source {
         VersionSource::Flag(v) | VersionSource::Env(v) => Ok(v),
-        VersionSource::ConfigCmd(cmd) => run_version_cmd(&cmd, run_dir),
-        VersionSource::GitDefault => run_git_describe(run_dir),
+        VersionSource::ConfigCmd(cmd) => run_version_cmd(&cmd, config_run_dir),
+        VersionSource::GitDefault => run_git_describe(invocation_dir),
     }
 }
 
-/// Directory version resolution subprocesses run in: the loaded config
-/// file's directory, falling back to the invocation directory when no
-/// config file exists. Anchoring at the config file keeps `version-cmd`
-/// working from any subdirectory (npm-script semantics); git describe is
-/// indifferent since git walks upward itself.
+/// Directory `version-cmd` runs in: the loaded config file's directory,
+/// falling back to the invocation directory when no config file exists.
+/// Anchoring at the config file keeps a relative path inside `version-cmd`
+/// working from any subdirectory (npm-script semantics). This is deliberately
+/// NOT used for the git-describe default (see [`resolve_current_version`]):
+/// unlike a shell command, git already walks upward from wherever it runs
+/// to find the enclosing repository, so anchoring it at the config
+/// directory buys nothing and risks pointing it at the wrong repository
+/// when the config lives above the actual repo.
 fn version_run_dir<'a>(config_source: Option<&'a Path>, start_dir: &'a Path) -> &'a Path {
     config_source.and_then(Path::parent).unwrap_or(start_dir)
 }
@@ -655,8 +671,8 @@ fn main() -> ExitCode {
             cfg.version_cmd.as_deref(),
         );
         let label = source.label();
-        let run_dir = version_run_dir(cfg.source.as_deref(), &start_dir);
-        let raw = match resolve_current_version(source, run_dir) {
+        let config_run_dir = version_run_dir(cfg.source.as_deref(), &start_dir);
+        let raw = match resolve_current_version(source, config_run_dir, &start_dir) {
             Ok(v) => v,
             Err(err) => {
                 eprintln!("todo-by: {err}");
@@ -942,12 +958,76 @@ mod tests {
 
     #[test]
     fn version_run_dir_prefers_config_dir_over_start_dir() {
+        // This directory feeds version-cmd only (see
+        // resolve_current_version); git-describe's default deliberately
+        // does not use it, covered separately below.
         let start = Path::new("/work/repo/src");
         assert_eq!(
             version_run_dir(Some(Path::new("/work/repo/todo-by.toml")), start),
             Path::new("/work/repo")
         );
         assert_eq!(version_run_dir(None, start), start);
+    }
+
+    /// Initializes a throwaway git repo at `dir` with one commit and one
+    /// tag, so `git describe --tags --abbrev=0` run there has something
+    /// deterministic to find.
+    fn init_git_repo_with_tag(dir: &Path, tag: &str) {
+        let run = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "todo-by-test")
+                .env("GIT_AUTHOR_EMAIL", "todo-by-test@example.com")
+                .env("GIT_COMMITTER_NAME", "todo-by-test")
+                .env("GIT_COMMITTER_EMAIL", "todo-by-test@example.com")
+                .output()
+                .expect("git must be installed to run this test");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init", "-q"]);
+        run(&["commit", "-q", "--allow-empty", "-m", "init"]);
+        // Explicit -a -m rather than a bare `git tag <name>`: some global
+        // git configs default a bare tag to annotated and then fail
+        // without a message, or vice versa. Being explicit sidesteps both.
+        run(&["tag", "-a", tag, "-m", tag]);
+    }
+
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("todo-by-main-test-{nanos}-{n}-{tag}"));
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        dir
+    }
+
+    #[test]
+    fn git_default_resolves_against_the_invocation_dir_not_the_config_dir() {
+        // Regression for a bug where GitDefault inherited version-cmd's
+        // config-dir anchoring: config discovery walks upward from the
+        // invocation directory, so the config file can legitimately live
+        // above the actual repository (a monorepo layout). `config_dir`
+        // here stands in for exactly that: it is NOT a git repository at
+        // all, so if git described anchored there by mistake, this would
+        // fail instead of returning the repo's real tag.
+        let config_dir = unique_temp_dir("git-default-config-dir");
+        let repo_dir = config_dir.join("project");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        init_git_repo_with_tag(&repo_dir, "v9.9.9");
+
+        let raw = resolve_current_version(VersionSource::GitDefault, &config_dir, &repo_dir)
+            .expect("git describe must succeed in the invocation dir's own repository");
+        assert_eq!(raw, "v9.9.9");
+
+        std::fs::remove_dir_all(&config_dir).ok();
     }
 
     fn version_pending(written: &str, message: &str) -> Finding {
