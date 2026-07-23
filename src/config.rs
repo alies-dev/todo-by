@@ -16,8 +16,8 @@
 //! - Anything else is an error: table/section headers (a line starting with
 //!   `[`), duplicate keys, literal single-quoted strings, and unknown keys.
 //!
-//! Recognized keys: `warn` (integer), `exclude` (string
-//! array), `tags` (string array). Errors are formatted as
+//! Recognized keys: `warn` (integer), `exclude` (string array), `tags`
+//! (string array), `version-cmd` (string). Errors are formatted as
 //! `label:LINE: message` with 1-based line numbers.
 
 use std::path::{Path, PathBuf};
@@ -26,12 +26,15 @@ use std::path::{Path, PathBuf};
 /// order: `todo-by.toml` wins over `.todo-by.toml` in the same directory.
 const CONFIG_FILENAMES: [&str; 2] = ["todo-by.toml", ".todo-by.toml"];
 
-const VALID_KEYS: &str = "warn, exclude, tags";
+const VALID_KEYS: &str = "warn, exclude, tags, version-cmd";
 
 #[derive(Debug)]
 pub struct Config {
     /// Days before a deadline at which tags start reporting as warnings.
     pub warn: Option<u32>,
+    /// Shell command (run via `sh -c`) whose trimmed stdout is the current
+    /// version, for resolving version-constraint triggers.
+    pub version_cmd: Option<String>,
     /// gitignore-style globs excluded on top of .gitignore.
     pub exclude: Vec<String>,
     /// Tags to match. Replaces the default entirely when set in the file.
@@ -44,6 +47,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             warn: None,
+            version_cmd: None,
             exclude: Vec::new(),
             tags: vec!["todo-by".to_string()],
             source: None,
@@ -76,9 +80,8 @@ pub fn load(start: &Path) -> Result<Config, String> {
 /// recognized field.
 enum Value {
     Int(u32),
-    /// Part of the general scalar grammar (see module docs); no currently
-    /// recognized key accepts a bare string, so this payload goes unread.
-    #[allow(dead_code)]
+    /// A basic double-quoted string; currently only `version-cmd` accepts
+    /// this shape.
     Str(String),
     Array(Vec<String>),
 }
@@ -87,6 +90,7 @@ enum Value {
 pub fn parse(text: &str, label: &str) -> Result<Config, String> {
     let lines: Vec<&str> = text.lines().collect();
     let mut warn: Option<u32> = None;
+    let mut version_cmd: Option<String> = None;
     let mut exclude: Option<Vec<String>> = None;
     let mut tags: Option<Vec<String>> = None;
     let mut seen_keys: Vec<&str> = Vec::new();
@@ -139,6 +143,15 @@ pub fn parse(text: &str, label: &str) -> Result<Config, String> {
                 };
                 warn = Some(n);
             }
+            "version-cmd" => {
+                let Value::Str(s) = value else {
+                    return Err(format!("{label}:{line_no}: version-cmd must be a string"));
+                };
+                if s.is_empty() {
+                    return Err(format!("{label}:{line_no}: version-cmd must not be empty"));
+                }
+                version_cmd = Some(s);
+            }
             "exclude" => {
                 let Value::Array(items) = value else {
                     return Err(format!(
@@ -186,6 +199,7 @@ pub fn parse(text: &str, label: &str) -> Result<Config, String> {
 
     Ok(Config {
         warn,
+        version_cmd,
         exclude: exclude.unwrap_or_default(),
         tags: tags.unwrap_or_else(|| vec!["todo-by".to_string()]),
         source: None,
@@ -390,6 +404,10 @@ pub fn dump(cfg: &Config) -> String {
         Some(n) => out.push_str(&format!("warn = {n}\n")),
         None => out.push_str("# warn = (not set)\n"),
     }
+    match &cfg.version_cmd {
+        Some(cmd) => out.push_str(&format!("version-cmd = \"{}\"\n", escape_str(cmd))),
+        None => out.push_str("# version-cmd = (not set)\n"),
+    }
     out.push_str(&format!("exclude = {}\n", dump_array(&cfg.exclude)));
     out.push_str(&format!("tags = {}\n", dump_array(&cfg.tags)));
     out
@@ -508,6 +526,25 @@ tags = [
         assert!(err.contains("warn"), "{err}");
         assert!(err.contains("exclude"), "{err}");
         assert!(err.contains("tags"), "{err}");
+        assert!(err.contains("version-cmd"), "{err}");
+    }
+
+    #[test]
+    fn version_cmd_parses_as_string() {
+        let cfg = parse("version-cmd = \"git describe --tags\"\n", "cfg").unwrap();
+        assert_eq!(cfg.version_cmd, Some("git describe --tags".to_string()));
+    }
+
+    #[test]
+    fn empty_version_cmd_is_rejected() {
+        let err = parse("version-cmd = \"\"\n", "cfg").unwrap_err();
+        assert!(err.contains("must not be empty"), "{err}");
+    }
+
+    #[test]
+    fn non_string_version_cmd_is_rejected() {
+        let err = parse("version-cmd = 5\n", "cfg").unwrap_err();
+        assert!(err.contains("must be a string"), "{err}");
     }
 
     #[test]
@@ -579,6 +616,20 @@ tags = [\"todo-by\"]
         let dumped = dump(&cfg);
         assert!(dumped.contains("# source: built-in defaults"), "{dumped}");
         assert!(dumped.contains("# warn = (not set)"), "{dumped}");
+        assert!(dumped.contains("# version-cmd = (not set)"), "{dumped}");
+    }
+
+    #[test]
+    fn dump_includes_set_version_cmd() {
+        let cfg = Config {
+            version_cmd: Some("jq -r .version package.json".to_string()),
+            ..Config::default()
+        };
+        let dumped = dump(&cfg);
+        assert!(
+            dumped.contains("version-cmd = \"jq -r .version package.json\""),
+            "{dumped}"
+        );
     }
 
     fn unique_temp_dir(tag: &str) -> PathBuf {

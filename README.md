@@ -64,6 +64,7 @@ todo-by --format text           # human-readable (default)
 todo-by --format github         # GitHub Actions annotations
 todo-by --format json           # JSON Lines, one object per finding
 todo-by --today 2026-12-31      # override "now" (useful for testing and CI dry runs)
+todo-by --current-version 2.1.0 # override the project's current version, for version triggers
 todo-by --warn 14               # also report tags due within 14 days, as warnings
 todo-by --exit-zero             # always exit 0 on findings (still 2 on errors)
 todo-by --color always          # auto, always, never (default: auto)
@@ -99,6 +100,37 @@ src/legacy.rs:8: due in 5 days (2026-07-14): drop the feature flag
 ```
 
 In `--format github`, warnings render as `::warning` annotations instead of `::error`.
+
+### Versions
+
+A tag can also fire once the project reaches a version, instead of a date. Write a comparator directly against a version number, with no space between them.
+
+```js
+// @todo-by >=2.0 drop legacy endpoint after v2 ships
+```
+
+The tag fires the moment the project's current version satisfies the constraint. A leading `v` on the version is optional and ignored (`>=v2.0` and `>=2.0` mean the same thing).
+
+| Comparator | Meaning |
+|---|---|
+| `>=2.0` | fires once the current version is 2.0 or later |
+| `>2.0` | fires once the current version is later than 2.0 |
+| `<`, `<=`, `=`, `==` | recognized but rejected as findings, not silently ignored |
+
+Only `>=` and `>` are supported. Users coming from `phpstan-todo-by` sometimes write `<1.0` to mean "before version 1.0", but this tool has no way to fire on a date it can never observe (a version that's never released), so it reports those as invalid rather than quietly never firing.
+
+Unlike dates, `--warn` never applies to version triggers: a future version isn't knowable ahead of time the way a future date is.
+
+`todo-by` resolves the current version once, only when the scan finds at least one version tag, in this order.
+
+1. `--current-version <X>` on the command line.
+2. The `TODO_BY_VERSION` environment variable.
+3. The `version-cmd` config key: a shell command whose trimmed stdout is the version, for example `version-cmd = "jq -r .version package.json"`. It runs in the config file's own directory, so a relative path (like `package.json` above) resolves against the file that declared it, not against wherever `todo-by` was invoked.
+4. `git describe --tags --abbrev=0`, with a leading `v` stripped. This runs in the directory `todo-by` was invoked in, not the config file's directory: git already walks upward on its own to find the repository, and a config file discovered above the actual repository (a monorepo layout, for example) would otherwise point git at the wrong one.
+
+`version-cmd` runs a shell command taken from the config file, so treat it the same as any other command a repository can make CI run, and only enable it in repositories you trust. It executes only when the scan actually finds a version tag, never on every run.
+
+In GitHub Actions, `actions/checkout` fetches no tags by default, so the git based default finds nothing to describe. Either set `fetch-depth: 0` or `fetch-tags: true` on the checkout step, or skip git entirely with `--current-version` or `TODO_BY_VERSION`.
 
 ## CI (GitHub Actions)
 
@@ -141,19 +173,20 @@ Everything git would track. `todo-by` uses ripgrep's directory walker, so `.giti
 warn = 14
 exclude = ["vendor/**", "*.gen.go"]
 tags = ["todo-by", "fixme-by"]
+version-cmd = "jq -r .version package.json"
 ```
 
 - `warn` (integer): same as `--warn`.
 - `exclude` (array of strings): gitignore-style globs excluded in addition to `.gitignore`. Globs are matched relative to the directory where `todo-by` runs, like ripgrep's `--glob`.
 - `tags` (array of strings): tags to match, case-insensitive. Setting this replaces the default (`todo-by`) entirely rather than adding to it.
+- `version-cmd` (string): a shell command whose trimmed stdout is the current version, used to resolve version triggers (see [Versions](#versions)). It runs via `sh -c` (on Windows, `cmd /C`) in the config file's directory, so relative paths keep working when `todo-by` is invoked from a subdirectory.
 
-Precedence: command line flags win, then the `TODO_BY_FORMAT` / `TODO_BY_WARN` environment variables, then the config file.
+Precedence: command line flags win, then the `TODO_BY_FORMAT` / `TODO_BY_WARN` / `TODO_BY_VERSION` environment variables, then the config file.
 
 Use `--dump-config` to see the effective config and where it came from, and `--files` to see which files would be scanned.
 
 ## Roadmap
 
-- Package version trigger (`todo-by >=2.0`)
 - GitHub issue closed trigger (`todo-by #123`)
 
 ## Prior art

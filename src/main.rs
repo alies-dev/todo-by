@@ -12,10 +12,12 @@ mod config;
 mod date;
 mod output;
 mod scanner;
+mod version;
 
 use date::Date;
 use output::{Format, RenderOpts};
 use scanner::{Finding, ScanCtx};
+use version::Version;
 
 const USAGE: &str = "\
 todo-by: flag todo-by tags whose deadline date has passed
@@ -31,6 +33,9 @@ Options:
                          [default: text; github auto-selected in GitHub Actions]
       --today <DATE>      Treat tags due on or before this date as overdue
                          (YYYY-MM-DD, default: today in UTC)
+      --current-version <X> Current version for version-constraint triggers
+                         (default: TODO_BY_VERSION env, then config
+                         version-cmd, then git describe --tags --abbrev=0)
       --warn <N>           Also report tags due within N days as warnings
       --exit-zero          Always exit 0 on findings (still 2 on errors)
       --color <WHEN>       Color: auto, always, never [default: auto]
@@ -54,6 +59,9 @@ struct Cli {
     paths: Vec<PathBuf>,
     format: Option<Format>,
     today: Option<String>,
+    /// Raw, unvalidated: validated lazily, only when the scan actually
+    /// produces a version candidate (see the laziness contract in `main`).
+    current_version: Option<String>,
     warn: Option<u32>,
     exit_zero: bool,
     color: ColorWhen,
@@ -67,6 +75,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
         paths: Vec::new(),
         format: None,
         today: None,
+        current_version: None,
         warn: None,
         exit_zero: false,
         color: ColorWhen::Auto,
@@ -96,6 +105,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
                 })
             }
             "--today" => cli.today = Some(value("--today")?),
+            "--current-version" => cli.current_version = Some(value("--current-version")?),
             "--warn" => {
                 let raw = value("--warn")?;
                 cli.warn =
@@ -191,6 +201,181 @@ fn resolve_warn(
             .map_err(|_| format!("TODO_BY_WARN must be a non-negative integer, got {v:?}"));
     }
     Ok(config_warn)
+}
+
+/// Where the current version comes from, in precedence order. A pure
+/// (I/O-free) choice: it just picks which tier wins given already-collected
+/// string values, so precedence can be unit tested without running git or a
+/// shell. Actually producing a version string from the winning tier (a
+/// shell command, or `git describe`) happens in `resolve_current_version`,
+/// which runs only for the tier this function picks.
+#[derive(Debug, PartialEq, Eq)]
+enum VersionSource {
+    Flag(String),
+    Env(String),
+    ConfigCmd(String),
+    GitDefault,
+}
+
+impl VersionSource {
+    /// Human-readable origin for error messages ("current version X from
+    /// Y is not valid", "could not run Y").
+    fn label(&self) -> String {
+        match self {
+            VersionSource::Flag(_) => "--current-version".to_string(),
+            VersionSource::Env(_) => "TODO_BY_VERSION".to_string(),
+            VersionSource::ConfigCmd(cmd) => format!("version-cmd {cmd:?}"),
+            VersionSource::GitDefault => "git describe --tags --abbrev=0".to_string(),
+        }
+    }
+}
+
+/// Precedence: `--current-version` flag, then `TODO_BY_VERSION` env, then
+/// the config's `version-cmd`, else the git-tag default.
+fn choose_version_source(
+    flag: Option<&str>,
+    env: Option<&str>,
+    config_cmd: Option<&str>,
+) -> VersionSource {
+    if let Some(v) = flag {
+        return VersionSource::Flag(v.to_string());
+    }
+    if let Some(v) = env {
+        return VersionSource::Env(v.to_string());
+    }
+    if let Some(cmd) = config_cmd {
+        return VersionSource::ConfigCmd(cmd.to_string());
+    }
+    VersionSource::GitDefault
+}
+
+/// Produces the raw current-version string for the chosen source, running a
+/// shell command or `git` only for the tier that actually won (laziness
+/// lives one level up: `main` only calls this when the scan produced a
+/// version candidate at all).
+///
+/// The two directories are NOT interchangeable: `config_run_dir` (see
+/// [`version_run_dir`]) is the config file's directory, so a relative path
+/// inside `version-cmd` resolves against the file that declared it. But
+/// `git describe`'s default MUST run in `invocation_dir` (where `todo-by`
+/// was actually invoked), not the config directory: config discovery walks
+/// upward from the invocation directory looking for `todo-by.toml`, so the
+/// config file can legitimately live above the repository itself (e.g. a
+/// monorepo config at `/work/todo-by.toml` with the repo at
+/// `/work/project`). Anchoring git there would make it describe the wrong
+/// repository, or fail outright if `/work` isn't a repository at all.
+fn resolve_current_version(
+    source: VersionSource,
+    config_run_dir: &Path,
+    invocation_dir: &Path,
+) -> Result<String, String> {
+    match source {
+        VersionSource::Flag(v) | VersionSource::Env(v) => Ok(v),
+        VersionSource::ConfigCmd(cmd) => run_version_cmd(&cmd, config_run_dir),
+        VersionSource::GitDefault => run_git_describe(invocation_dir),
+    }
+}
+
+/// Directory `version-cmd` runs in: the loaded config file's directory,
+/// falling back to the invocation directory when no config file exists.
+/// Anchoring at the config file keeps a relative path inside `version-cmd`
+/// working from any subdirectory (npm-script semantics). This is deliberately
+/// NOT used for the git-describe default (see [`resolve_current_version`]):
+/// unlike a shell command, git already walks upward from wherever it runs
+/// to find the enclosing repository, so anchoring it at the config
+/// directory buys nothing and risks pointing it at the wrong repository
+/// when the config lives above the actual repo.
+fn version_run_dir<'a>(config_source: Option<&'a Path>, start_dir: &'a Path) -> &'a Path {
+    config_source.and_then(Path::parent).unwrap_or(start_dir)
+}
+
+fn run_version_cmd(cmd: &str, run_dir: &Path) -> Result<String, String> {
+    // `sh` isn't a given on Windows runners/installs; `cmd` is.
+    let output = if cfg!(windows) {
+        std::process::Command::new("cmd")
+            .arg("/C")
+            .arg(cmd)
+            .current_dir(run_dir)
+            .output()
+    } else {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(run_dir)
+            .output()
+    }
+    .map_err(|err| format!("version-cmd {cmd:?} failed to run: {err}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!(
+            "version-cmd {cmd:?} exited with {}: {stderr}",
+            output.status
+        ));
+    }
+    if stdout.is_empty() {
+        return Err(format!("version-cmd {cmd:?} produced empty output"));
+    }
+    Ok(stdout)
+}
+
+/// Errors only when actually called: `main` only reaches this when the
+/// scan produced a version candidate, so a repo with no version tags in
+/// comments never runs git and never fails because it has no git tags.
+fn run_git_describe(run_dir: &Path) -> Result<String, String> {
+    const REMEDY: &str = "set version-cmd in todo-by.toml or pass --current-version";
+    let output = std::process::Command::new("git")
+        .args(["describe", "--tags", "--abbrev=0"])
+        .current_dir(run_dir)
+        .output()
+        .map_err(|err| {
+            format!(
+                "could not determine current version: git describe failed to run ({err}); {REMEDY}"
+            )
+        })?;
+    if !output.status.success() {
+        // git's own stderr distinguishes "no tags" from e.g. "not a git
+        // repository"; hardcoding one cause here would misreport the others.
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = if stderr.is_empty() {
+            "found no tags".to_string()
+        } else {
+            stderr
+        };
+        return Err(format!(
+            "could not determine current version: git describe --tags --abbrev=0 failed ({detail}); {REMEDY}"
+        ));
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        return Err(format!(
+            "could not determine current version: git describe --tags --abbrev=0 produced no output; {REMEDY}"
+        ));
+    }
+    Ok(raw)
+}
+
+/// Resolves every `VersionPending` finding the scanner couldn't classify on
+/// its own: promotes satisfied ones to `VersionReached { written }`, and
+/// drops the rest. The current version itself isn't stored on the
+/// finding: it's the same for every finding in a run, so it travels once
+/// via `RenderOpts` instead (set by the caller after this returns).
+fn resolve_version_candidates(findings: &mut Vec<Finding>, current: &Version) {
+    findings.retain_mut(|f| {
+        let scanner::Kind::VersionPending {
+            written,
+            constraint,
+        } = &f.kind
+        else {
+            return true; // not a version candidate, keep as-is
+        };
+        if !constraint.satisfied_by(current) {
+            return false; // not yet satisfied, drop
+        }
+        let written = written.clone();
+        f.kind = scanner::Kind::VersionReached { written };
+        true
+    });
 }
 
 /// Resolves whether Text output should be colored. `auto` requires a TTY
@@ -469,12 +654,52 @@ fn main() -> ExitCode {
         }
     }
 
+    // Laziness is a hard requirement: resolving the current version can run
+    // git or a config-defined shell command, so it must happen only when
+    // the scan actually produced a version candidate. A repo with no
+    // version tags in comments never runs git and never fails over missing
+    // tags; invalid-trigger findings alone (already fully classified) don't
+    // count as a candidate either.
+    let mut current_version: Option<String> = None;
+    if findings
+        .iter()
+        .any(|f| matches!(f.kind, scanner::Kind::VersionPending { .. }))
+    {
+        let source = choose_version_source(
+            cli.current_version.as_deref(),
+            std::env::var("TODO_BY_VERSION").ok().as_deref(),
+            cfg.version_cmd.as_deref(),
+        );
+        let label = source.label();
+        let config_run_dir = version_run_dir(cfg.source.as_deref(), &start_dir);
+        let raw = match resolve_current_version(source, config_run_dir, &start_dir) {
+            Ok(v) => v,
+            Err(err) => {
+                eprintln!("todo-by: {err}");
+                return ExitCode::from(2);
+            }
+        };
+        // Version::parse strips a leading v/V itself, so this is the only
+        // place main.rs touches the raw resolved string; the display form
+        // comes from the parsed Version's Display, not from `raw` again.
+        let current = match Version::parse(&raw) {
+            Some(v) => v,
+            None => {
+                eprintln!("todo-by: current version {raw:?} from {label} is not a valid version");
+                return ExitCode::from(2);
+            }
+        };
+        resolve_version_candidates(&mut findings, &current);
+        current_version = Some(current.to_string());
+    }
+
     findings.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
 
     let opts = RenderOpts {
         format,
         color,
         today,
+        current_version,
     };
     output::render(&findings, &opts);
 
@@ -671,5 +896,185 @@ mod tests {
         assert!(!resolve_color(ColorWhen::Auto, true, true, false));
         // TERM=dumb disables auto color
         assert!(!resolve_color(ColorWhen::Auto, true, false, true));
+    }
+
+    #[test]
+    fn current_version_flag_inline_and_split_forms() {
+        let cli = parse_args(args(&["--current-version=2.1.0"])).unwrap();
+        assert_eq!(cli.current_version, Some("2.1.0".to_string()));
+        let cli = parse_args(args(&["--current-version", "2.1.0"])).unwrap();
+        assert_eq!(cli.current_version, Some("2.1.0".to_string()));
+    }
+
+    #[test]
+    fn current_version_flag_defers_validation() {
+        // Unlike --today, an unparsable value here is not rejected at parse
+        // time: laziness means it's only validated if the scan produces a
+        // version candidate, which parse_args can't know about.
+        let cli = parse_args(args(&["--current-version", "not-a-version"])).unwrap();
+        assert_eq!(cli.current_version, Some("not-a-version".to_string()));
+    }
+
+    #[test]
+    fn version_source_precedence() {
+        // flag beats env beats config's version-cmd beats the git default
+        assert_eq!(
+            choose_version_source(Some("2.0.0"), Some("3.0.0"), Some("cmd")),
+            VersionSource::Flag("2.0.0".to_string())
+        );
+        assert_eq!(
+            choose_version_source(None, Some("3.0.0"), Some("cmd")),
+            VersionSource::Env("3.0.0".to_string())
+        );
+        assert_eq!(
+            choose_version_source(None, None, Some("cmd")),
+            VersionSource::ConfigCmd("cmd".to_string())
+        );
+        assert_eq!(
+            choose_version_source(None, None, None),
+            VersionSource::GitDefault
+        );
+    }
+
+    #[test]
+    fn version_source_labels_name_their_origin() {
+        assert_eq!(
+            VersionSource::Flag("2.0".to_string()).label(),
+            "--current-version"
+        );
+        assert_eq!(
+            VersionSource::Env("2.0".to_string()).label(),
+            "TODO_BY_VERSION"
+        );
+        assert_eq!(
+            VersionSource::ConfigCmd("jq -r .version".to_string()).label(),
+            "version-cmd \"jq -r .version\""
+        );
+        assert_eq!(
+            VersionSource::GitDefault.label(),
+            "git describe --tags --abbrev=0"
+        );
+    }
+
+    #[test]
+    fn version_run_dir_prefers_config_dir_over_start_dir() {
+        // This directory feeds version-cmd only (see
+        // resolve_current_version); git-describe's default deliberately
+        // does not use it, covered separately below.
+        let start = Path::new("/work/repo/src");
+        assert_eq!(
+            version_run_dir(Some(Path::new("/work/repo/todo-by.toml")), start),
+            Path::new("/work/repo")
+        );
+        assert_eq!(version_run_dir(None, start), start);
+    }
+
+    /// Initializes a throwaway git repo at `dir` with one commit and one
+    /// tag, so `git describe --tags --abbrev=0` run there has something
+    /// deterministic to find.
+    fn init_git_repo_with_tag(dir: &Path, tag: &str) {
+        let run = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "todo-by-test")
+                .env("GIT_AUTHOR_EMAIL", "todo-by-test@example.com")
+                .env("GIT_COMMITTER_NAME", "todo-by-test")
+                .env("GIT_COMMITTER_EMAIL", "todo-by-test@example.com")
+                .output()
+                .expect("git must be installed to run this test");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        run(&["init", "-q"]);
+        run(&["commit", "-q", "--allow-empty", "-m", "init"]);
+        // Explicit -a -m rather than a bare `git tag <name>`: some global
+        // git configs default a bare tag to annotated and then fail
+        // without a message, or vice versa. Being explicit sidesteps both.
+        run(&["tag", "-a", tag, "-m", tag]);
+    }
+
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("todo-by-main-test-{nanos}-{n}-{tag}"));
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        dir
+    }
+
+    #[test]
+    fn git_default_resolves_against_the_invocation_dir_not_the_config_dir() {
+        // Regression for a bug where GitDefault inherited version-cmd's
+        // config-dir anchoring: config discovery walks upward from the
+        // invocation directory, so the config file can legitimately live
+        // above the actual repository (a monorepo layout). `config_dir`
+        // here stands in for exactly that: it is NOT a git repository at
+        // all, so if git described anchored there by mistake, this would
+        // fail instead of returning the repo's real tag.
+        let config_dir = unique_temp_dir("git-default-config-dir");
+        let repo_dir = config_dir.join("project");
+        std::fs::create_dir_all(&repo_dir).unwrap();
+        init_git_repo_with_tag(&repo_dir, "v9.9.9");
+
+        let raw = resolve_current_version(VersionSource::GitDefault, &config_dir, &repo_dir)
+            .expect("git describe must succeed in the invocation dir's own repository");
+        assert_eq!(raw, "v9.9.9");
+
+        std::fs::remove_dir_all(&config_dir).ok();
+    }
+
+    fn version_pending(written: &str, message: &str) -> Finding {
+        Finding {
+            file: "a.rs".to_string(),
+            line: 1,
+            kind: scanner::Kind::VersionPending {
+                written: written.to_string(),
+                constraint: version::Constraint::parse(written).unwrap(),
+            },
+            message: message.to_string(),
+        }
+    }
+
+    #[test]
+    fn resolve_version_candidates_promotes_satisfied_and_drops_unsatisfied() {
+        let mut findings = vec![
+            version_pending(">=2.0", "satisfied"),
+            version_pending(">=999.0", "not yet"),
+        ];
+        let current = Version::parse("2.1.0").unwrap();
+        resolve_version_candidates(&mut findings, &current);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].message, "satisfied");
+        match &findings[0].kind {
+            scanner::Kind::VersionReached { written } => assert_eq!(written, ">=2.0"),
+            _ => panic!("expected VersionReached"),
+        }
+    }
+
+    #[test]
+    fn resolution_is_skipped_when_no_candidates_are_present() {
+        // Documents the laziness contract at the point it's enforced: main()
+        // only resolves the current version behind an
+        // any(kind == VersionPending) guard. InvalidTrigger findings are
+        // already fully classified and must not count as a candidate.
+        let findings = [Finding {
+            file: "a.rs".to_string(),
+            line: 1,
+            kind: scanner::Kind::InvalidTrigger {
+                written: "<1.0".to_string(),
+            },
+            message: "old".to_string(),
+        }];
+        assert!(!findings
+            .iter()
+            .any(|f| matches!(f.kind, scanner::Kind::VersionPending { .. })));
     }
 }

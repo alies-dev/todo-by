@@ -37,6 +37,11 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          # Full history, not just the default shallow clone: the self-scan
+          # below has a live version-trigger tag in README.md, and resolving
+          # it needs `git describe --tags --abbrev=0` to find a reachable
+          # tag, which a depth-1 clone doesn't have.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo test --locked
