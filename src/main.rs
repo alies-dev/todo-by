@@ -20,7 +20,7 @@ use scanner::{Finding, ScanCtx};
 use version::Version;
 
 const USAGE: &str = "\
-todo-by: flag todo-by tags whose deadline date has passed
+todo-by: flag todo-by tags whose deadline has passed or whose version has shipped
 
 Usage: todo-by [OPTIONS] [PATHS]...
 

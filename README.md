@@ -4,7 +4,7 @@
 [![crates.io](https://img.shields.io/crates/v/todo-by-cli.svg)](https://crates.io/crates/todo-by-cli)
 [![license](https://img.shields.io/crates/l/todo-by-cli.svg)](LICENSE)
 
-Flag `todo-by` tags whose deadline date has passed. Works on any file type. Tiny and lightning-fast. Respects your .gitignore.
+Flag `todo-by` tags whose deadline has passed, or whose target version has shipped. Works on any file type. Tiny and lightning-fast. Respects your .gitignore.
 
 ## Idea
 
