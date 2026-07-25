@@ -115,12 +115,14 @@ The tag fires the moment the project's current version satisfies the constraint.
 
 | Written as | Meaning |
 |---|---|
-| `2.0`, `v2.0`, `>=2.0` | fires once the current version is 2.0 or later |
+| `2.0`, `v2.0`, `>=2.0`, `>= 2.0` | fires once the current version is 2.0 or later |
 | `2026.01` | fires once the current version is 2026.1 or later |
 | `>2.0` | fires once the current version is later than 2.0 |
-| `<`, `<=`, `=`, `==` | recognized but rejected as findings, not silently ignored |
+| `<`, `<=`, `=`, `==`, `^`, `~` | recognized but rejected as findings, not silently ignored |
 
-A bare version needs either a dot or a `v` prefix, so `2026` is never guessed at: write `v2026` for the version and `2026-12` for the deadline. Only `>=` and `>` are supported. Writing `<1.0` to mean "before version 1.0" is a natural reach, but this tool has no way to fire on something it can never observe (a version that is never released), so it reports those as invalid rather than quietly never firing.
+A space after the comparator is allowed, so `>= 2.0` and `>=2.0` are the same tag. The version still has to look like one (a dot, a `v`, or a four digit year), which is what keeps prose such as `todo-by > 5 files left` from becoming a live constraint on version 5.
+
+A bare version needs either a dot or a `v` prefix, so `2026` is never guessed at: write `v2026` for the version and `2026-12` for the deadline. Only `>=` and `>` are supported. Writing `<1.0` to mean "before version 1.0" is a natural reach, and so is borrowing `^1.0` or `~1.0` from a package manager, but this tool has no way to fire on something it can never observe (a version that is never released, or one above a ceiling), so it reports those as invalid rather than quietly never firing.
 
 Unlike dates, `--warn` never applies to version triggers: a future version isn't knowable ahead of time the way a future date is.
 
@@ -129,7 +131,7 @@ Unlike dates, `--warn` never applies to version triggers: a future version isn't
 1. `--current-version <X>` on the command line.
 2. The `TODO_BY_VERSION` environment variable.
 3. The `version-cmd` config key: a shell command whose trimmed stdout is the version, for example `version-cmd = "jq -r .version package.json"`. It runs in the config file's own directory, so a relative path (like `package.json` above) resolves against the file that declared it, not against wherever `todo-by` was invoked.
-4. `git describe --tags --abbrev=0`, with a leading `v` stripped. This runs in the directory `todo-by` was invoked in, not the config file's directory: git already walks upward on its own to find the repository, and a config file discovered above the actual repository (a monorepo layout, for example) would otherwise point git at the wrong one.
+4. `git describe --tags --abbrev=0`, with a leading `v` or `V` stripped. This runs in the directory `todo-by` was invoked in, not the config file's directory: git already walks upward on its own to find the repository, and a config file discovered above the actual repository (a monorepo layout, for example) would otherwise point git at the wrong one.
 
 `version-cmd` runs a shell command taken from the config file, so treat it the same as any other command a repository can make CI run, and only enable it in repositories you trust. It executes only when the scan actually finds a version tag, never on every run.
 
@@ -155,7 +157,7 @@ Go and PHP projects usually keep no version in a manifest at all, so the git tag
 
 Two things worth checking when a recipe misbehaves: the command runs in the config file's directory (so relative paths resolve against the config file, not the invocation directory), and it must print the version alone, since the whole trimmed stdout is the version.
 
-In GitHub Actions, `actions/checkout` fetches no tags by default, so the git based default finds nothing to describe. Either set `fetch-depth: 0` or `fetch-tags: true` on the checkout step, or skip git entirely with `--current-version` or `TODO_BY_VERSION`.
+In GitHub Actions, `actions/checkout` fetches no tags by default, so the git based default finds nothing to describe. Set `fetch-depth: 0` on the checkout step, or skip git entirely with `--current-version` or `TODO_BY_VERSION`. Note that `fetch-tags: true` alone is not enough: it fetches the tag objects but leaves the clone shallow, so `git describe` still reports `No tags can describe` unless HEAD happens to be the tagged commit itself.
 
 ## CI (GitHub Actions)
 

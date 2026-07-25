@@ -32,8 +32,9 @@ const VALID_KEYS: &str = "warn, exclude, tags, version-cmd";
 pub struct Config {
     /// Days before a deadline at which tags start reporting as warnings.
     pub warn: Option<u32>,
-    /// Shell command (run via `sh -c`) whose trimmed stdout is the current
-    /// version, for resolving version-constraint triggers.
+    /// Shell command (run via `sh -c`, or `cmd /C` on Windows) whose
+    /// trimmed stdout is the current version, for resolving
+    /// version-constraint triggers.
     pub version_cmd: Option<String>,
     /// gitignore-style globs excluded on top of .gitignore.
     pub exclude: Vec<String>,

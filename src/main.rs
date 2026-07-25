@@ -276,6 +276,28 @@ fn resolve_current_version(
     }
 }
 
+/// Whether the scan produced anything that needs a current version. This
+/// is the laziness guard: no subprocess runs, and no missing-tag failure
+/// is possible, for a tree whose tags are all dates. An invalid-trigger
+/// finding doesn't count, being already fully classified.
+fn needs_version_resolution(findings: &[Finding]) -> bool {
+    findings
+        .iter()
+        .any(|f| matches!(f.kind, scanner::Kind::VersionPending { .. }))
+}
+
+/// Parses a resolved current version, which unlike trigger text is a
+/// string this tool did not ask anyone to write: a git tag name, a
+/// command's stdout, a CI variable. A `V` prefix is therefore accepted
+/// here even though `V2.0` is invalid inside a tag, since failing an
+/// entire scan over someone else's tag capitalization trades a real
+/// report for a cosmetic objection.
+fn parse_current_version(raw: &str, label: &str) -> Result<Version, String> {
+    let normalized = raw.strip_prefix(['v', 'V']).unwrap_or(raw);
+    Version::parse(normalized)
+        .ok_or_else(|| format!("current version {raw:?} from {label} is not a valid version"))
+}
+
 /// Directory `version-cmd` runs in: the loaded config file's directory,
 /// falling back to the invocation directory when no config file exists.
 /// Anchoring at the config file keeps a relative path inside `version-cmd`
@@ -290,18 +312,23 @@ fn version_run_dir<'a>(config_source: Option<&'a Path>, start_dir: &'a Path) -> 
 }
 
 fn run_version_cmd(cmd: &str, run_dir: &Path) -> Result<String, String> {
-    // `sh` isn't a given on Windows runners/installs; `cmd` is.
+    // `sh` isn't a given on Windows runners/installs; `cmd` is. stdin is
+    // closed rather than inherited: a command that decides to prompt (a
+    // credential helper, say) would otherwise block a CI job forever with
+    // no output, instead of failing at once on a closed stdin.
     let output = if cfg!(windows) {
         std::process::Command::new("cmd")
             .arg("/C")
             .arg(cmd)
             .current_dir(run_dir)
+            .stdin(std::process::Stdio::null())
             .output()
     } else {
         std::process::Command::new("sh")
             .arg("-c")
             .arg(cmd)
             .current_dir(run_dir)
+            .stdin(std::process::Stdio::null())
             .output()
     }
     .map_err(|err| format!("version-cmd {cmd:?} failed to run: {err}"))?;
@@ -327,6 +354,7 @@ fn run_git_describe(run_dir: &Path) -> Result<String, String> {
     let output = std::process::Command::new("git")
         .args(["describe", "--tags", "--abbrev=0"])
         .current_dir(run_dir)
+        .stdin(std::process::Stdio::null())
         .output()
         .map_err(|err| {
             format!(
@@ -661,36 +689,41 @@ fn main() -> ExitCode {
     // tags; invalid-trigger findings alone (already fully classified) don't
     // count as a candidate either.
     let mut current_version: Option<String> = None;
-    if findings
-        .iter()
-        .any(|f| matches!(f.kind, scanner::Kind::VersionPending { .. }))
-    {
+    if needs_version_resolution(&findings) {
+        // An empty value is treated as unset rather than as a version:
+        // `TODO_BY_VERSION: ${{ inputs.version }}` with no input expands to
+        // the empty string, and honoring that would outrank `version-cmd`
+        // and git and then fail the run outright, so the documented
+        // fallback ladder would never be reached.
+        let env_version = std::env::var("TODO_BY_VERSION")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
         let source = choose_version_source(
             cli.current_version.as_deref(),
-            std::env::var("TODO_BY_VERSION").ok().as_deref(),
+            env_version.as_deref(),
             cfg.version_cmd.as_deref(),
         );
         let label = source.label();
         let config_run_dir = version_run_dir(cfg.source.as_deref(), &start_dir);
-        let raw = match resolve_current_version(source, config_run_dir, &start_dir) {
-            Ok(v) => v,
+        match resolve_current_version(source, config_run_dir, &start_dir)
+            .and_then(|raw| parse_current_version(&raw, &label))
+        {
+            Ok(current) => {
+                resolve_version_candidates(&mut findings, &current);
+                current_version = Some(current.to_string());
+            }
+            // A failure here must not swallow the findings that don't
+            // depend on it. An overdue date is already fully classified,
+            // and hiding it because `git describe` found no tag would let
+            // an unrelated setup problem mask a real deadline. Report the
+            // error, drop only the candidates that can't be judged without
+            // a version, and render the rest; the run still exits 2.
             Err(err) => {
                 eprintln!("todo-by: {err}");
-                return ExitCode::from(2);
+                had_error = true;
+                findings.retain(|f| !matches!(f.kind, scanner::Kind::VersionPending { .. }));
             }
-        };
-        // Version::parse strips a leading v/V itself, so this is the only
-        // place main.rs touches the raw resolved string; the display form
-        // comes from the parsed Version's Display, not from `raw` again.
-        let current = match Version::parse(&raw) {
-            Some(v) => v,
-            None => {
-                eprintln!("todo-by: current version {raw:?} from {label} is not a valid version");
-                return ExitCode::from(2);
-            }
-        };
-        resolve_version_candidates(&mut findings, &current);
-        current_version = Some(current.to_string());
+        }
     }
 
     findings.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
@@ -1061,11 +1094,11 @@ mod tests {
 
     #[test]
     fn resolution_is_skipped_when_no_candidates_are_present() {
-        // Documents the laziness contract at the point it's enforced: main()
-        // only resolves the current version behind an
-        // any(kind == VersionPending) guard. InvalidTrigger findings are
-        // already fully classified and must not count as a candidate.
-        let findings = [Finding {
+        // Calls the guard main() actually calls, rather than restating its
+        // condition here: an inlined copy would keep passing if the real
+        // guard were deleted, which is exactly the regression that would
+        // make a date-only tree start running git.
+        let invalid_only = [Finding {
             file: "a.rs".to_string(),
             line: 1,
             kind: scanner::Kind::InvalidTrigger {
@@ -1073,8 +1106,44 @@ mod tests {
             },
             message: "old".to_string(),
         }];
-        assert!(!findings
-            .iter()
-            .any(|f| matches!(f.kind, scanner::Kind::VersionPending { .. })));
+        // An InvalidTrigger finding is already fully classified, so it must
+        // not drag a subprocess in behind it.
+        assert!(!needs_version_resolution(&invalid_only));
+        assert!(!needs_version_resolution(&[]));
+        assert!(needs_version_resolution(&[version_pending(
+            ">=2.0",
+            "candidate"
+        )]));
+    }
+
+    #[test]
+    fn version_cmd_runs_in_the_given_directory_and_reports_failures() {
+        // The directory argument is the whole point of the config-anchoring
+        // fix: a relative path inside version-cmd must resolve against the
+        // config file, not the invocation directory. Without a test, that
+        // argument can be swapped back with every other test still green.
+        let dir = std::env::temp_dir().join("todo-by-version-cmd-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("VERSION"), "4.2.0\n").unwrap();
+
+        let cmd = if cfg!(windows) {
+            "type VERSION"
+        } else {
+            "cat VERSION"
+        };
+        assert_eq!(run_version_cmd(cmd, &dir).unwrap(), "4.2.0");
+
+        // Same command one level up, where the file doesn't exist: the
+        // failure surfaces instead of silently yielding an empty version.
+        let parent = dir.parent().unwrap();
+        assert!(run_version_cmd("cat todo-by-no-such-version-file", parent).is_err());
+
+        // Non-zero exit and empty stdout are both errors, not versions.
+        let err = run_version_cmd("exit 3", &dir).unwrap_err();
+        assert!(err.contains("exit"), "unexpected message: {err}");
+        assert!(run_version_cmd("true", &dir).is_err());
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

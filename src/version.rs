@@ -24,7 +24,7 @@ fn is_valid_identifier(id: &str) -> bool {
 }
 
 impl Version {
-    /// Parses `[v|V]<core>[-<pre>][+<build>]`, where `<core>` is 1 to 3
+    /// Parses `[v]<core>[-<pre>][+<build>]`, where `<core>` is 1 to 3
     /// dot-separated ASCII-digit components each fitting a `u64`.
     ///
     /// Rejects rather than degrades on anything ambiguous: an empty
@@ -226,7 +226,9 @@ impl Constraint {
         } else {
             (Cmp::Gt, written.strip_prefix('>')?)
         };
-        let version = Version::parse(rest)?;
+        // `rest` may carry the space from a `>= 2.0` spelling, which the
+        // scanner accepts (see its `parse_version_span`).
+        let version = Version::parse(rest.trim_start())?;
         Some(Constraint { cmp, version })
     }
 
@@ -235,10 +237,11 @@ impl Constraint {
     /// version. `>=` is what nearly every real tag wants, so it gets the
     /// short spelling; anything else has to say so explicitly.
     ///
-    /// The caller decides what may reach this: the scanner only routes
-    /// digit-leading spans that contain a `.`, which is what keeps a lone
-    /// year (`2026`) from quietly becoming a one-component version
-    /// constraint instead of the deadline it used to be.
+    /// The caller decides what may reach this: the scanner routes
+    /// `v`-prefixed spans plus digit-leading spans that contain a `.`. A
+    /// lone `2026` matches neither, which is what keeps it from quietly
+    /// becoming a one-component version constraint instead of the deadline
+    /// it used to be; `v2026` is the way to ask for that constraint.
     pub fn parse_bare(written: &str) -> Option<Constraint> {
         Some(Constraint {
             cmp: Cmp::Ge,
@@ -266,14 +269,16 @@ impl Constraint {
 /// that's a silent false negative (never reported at all, not even as
 /// `InvalidTrigger`), not a loud rejection. Keep this in sync with
 /// `Constraint::parse` and [`UNSUPPORTED_COMPARATORS`].
-pub const COMPARATORS: [&str; 6] = [">=", "<=", "==", ">", "<", "="];
+pub const COMPARATORS: [&str; 8] = [">=", "<=", "==", ">", "<", "=", "^", "~"];
 
 /// Comparators that read as "before version X" (`<1.0`, `<=1.0`, `=1.0`,
-/// `==1.0`), a natural thing to reach for. Silently treating them as unparsable
+/// `==1.0`), a natural thing to reach for, plus the range operators every
+/// package manager uses (`^1.0`, `~1.0`), which pin an upper bound this
+/// tool has no way to act on. Silently treating any of them as unparsable
 /// would be worse than useless: unlike a plain typo, these read as valid
 /// intent that would otherwise never fire, postponing the chore forever.
 /// Ordered longest-prefix-first so `==`/`<=` are found before `=`/`<`.
-const UNSUPPORTED_COMPARATORS: [&str; 4] = ["==", "<=", "<", "="];
+const UNSUPPORTED_COMPARATORS: [&str; 6] = ["==", "<=", "<", "=", "^", "~"];
 
 /// When `written` (the full `comparator + version` token as scanned) starts
 /// with a comparator this tool intentionally rejects, returns that

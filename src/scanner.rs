@@ -164,9 +164,10 @@ fn match_line_from<'a>(
 /// Committing rule: an optional `v`/`V` prefix, a run of digits, then
 /// either a `.` separator (a version: `0.2`, `2026.01`), a `-` separator
 /// after exactly four digits (a date: `2026-09`), or exactly four digits
-/// with no separator at all. That last case exists only so a v0.2-era
-/// year-only tag (a lone `2026`) still matches and is reported as an
-/// error rather than silently ignored. A tag followed by `2 things`,
+/// with no separator at all. That last case commits on four digits plus
+/// anything, which is what keeps both a v0.2-era year-only tag (a lone
+/// `2026`) and a malformed one (`2026/01/05`) matched and reported as
+/// errors rather than silently ignored. A tag followed by `2 things`,
 /// `12345`, or `12345-06` stays a non-match, the last one keeping
 /// five-digit years out of the date path exactly as the four-digit gate
 /// used to.
@@ -235,6 +236,19 @@ fn parse_version_span(bytes: &[u8], start: usize) -> Option<usize> {
         .find(|c| bytes[start..].starts_with(c.as_bytes()))?
         .len();
     let mut j = start + cmp_len;
+    // `>= 2.0` with a space is how package managers and people write it,
+    // so it's accepted, but only when what follows clears the stricter
+    // bare committing rule (a dot, a `v`, or a four-digit year). Without
+    // that gate, prose like `todo-by > 5 files left` would become a live
+    // constraint on version 5: the immediately-following-digit rule that
+    // protects the unspaced form stops protecting anything once a space is
+    // allowed through.
+    if bytes.get(j).is_some_and(|&b| matches!(b, b' ' | b'\t')) {
+        while bytes.get(j).is_some_and(|&b| matches!(b, b' ' | b'\t')) {
+            j += 1;
+        }
+        return parse_bare_span(bytes, j);
+    }
     if bytes.get(j).is_some_and(|&b| matches!(b, b'v' | b'V')) {
         j += 1;
     }
@@ -328,9 +342,9 @@ pub fn scan_text(file_label: &str, text: &str, ctx: &ScanCtx, findings: &mut Vec
 /// `parse_version_span`, so it carries a comparator (`>=2.0`). The rest
 /// came from `parse_bare_span`: a `v` prefix always means a version
 /// (`v2026.01`), and without one the span is a version when it contains a
-/// `.` (`2026.01`) and a date otherwise (`2026-09`). `.` is tested before
-/// `-` so a bare pre-release like `2026.01-rc.1` stays a version instead
-/// of being read as a malformed date.
+/// `.` (`2026.01`) and a date otherwise (`2026-09`). Only `.` is tested,
+/// not `-`, which is what keeps a bare pre-release like `2026.01-rc.1` a
+/// version instead of a malformed date.
 ///
 /// The split costs dotted dates: `2026.09.01` is a valid three-component
 /// version, so it is treated as one rather than as a mistyped date. Dates
@@ -829,10 +843,62 @@ mod tests {
     }
 
     #[test]
-    fn comparator_followed_by_space_does_not_match() {
+    fn spaced_comparator_matches_only_when_the_version_clears_the_bare_rule() {
         let todo_by_tags = todo_by();
-        let line = format!("// todo-by {} 2.0 drop it", ">=");
-        assert_eq!(match_line(&line, &todo_by_tags), None);
+        let today = Date::new(2999, 1, 1).unwrap();
+        let c = ctx(today, None, &todo_by_tags);
+
+        for written in [">= 2.0", ">=  2.0", "> v2.0", ">= 2999"] {
+            let line = format!("// todo-by {written} drop it");
+            let mut findings = Vec::new();
+            scan_text("f", &line, &c, &mut findings);
+            assert_eq!(findings.len(), 1, "{line:?}");
+            match &findings[0].kind {
+                Kind::VersionPending {
+                    written: w,
+                    constraint,
+                } => {
+                    assert_eq!(w, written, "{line:?}");
+                    assert_eq!(
+                        constraint,
+                        &Constraint::parse(&written.replace(' ', "")).unwrap(),
+                        "spacing must not change meaning: {line:?}"
+                    );
+                }
+                _ => panic!("expected VersionPending for {line:?}"),
+            }
+        }
+
+        // Prose: a bare number after a comparator is not a version, or the
+        // shell redirection in this project's own docs would become a tag.
+        for line in [
+            "// todo-by > 5 files left to migrate",
+            "// todo-by > out.txt",
+            "// todo-by >= 12345 items",
+        ] {
+            assert_eq!(match_line(line, &todo_by_tags), None, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn range_comparators_are_rejected_loudly() {
+        // `^1.0` and `~1.0` pin an upper bound this tool can't act on.
+        // Leaving them out of COMPARATORS entirely would skip the tag with
+        // no output at all, which is the one outcome worth avoiding.
+        let todo_by_tags = todo_by();
+        let today = Date::new(2999, 1, 1).unwrap();
+        let c = ctx(today, None, &todo_by_tags);
+        for cmp in ["^", "~"] {
+            let written = format!("{cmp}2.0");
+            let line = format!("// todo-by {written} drop it");
+            let mut findings = Vec::new();
+            scan_text("f", &line, &c, &mut findings);
+            assert_eq!(findings.len(), 1, "{line:?}");
+            match &findings[0].kind {
+                Kind::InvalidTrigger { written: w } => assert_eq!(w, &written, "{line:?}"),
+                _ => panic!("expected InvalidTrigger for {line:?}"),
+            }
+        }
     }
 
     #[test]
