@@ -120,7 +120,7 @@ The tag fires the moment the project's current version satisfies the constraint.
 | `>2.0` | fires once the current version is later than 2.0 |
 | `<`, `<=`, `=`, `==`, `^`, `~` | recognized but rejected as findings, not silently ignored |
 
-A space after the comparator is allowed, so `>= 2.0` and `>=2.0` are the same tag. The version still has to look like one (a dot, a `v`, or a four digit year), which is what keeps prose such as `todo-by > 5 files left` from becoming a live constraint on version 5.
+A space after the comparator is allowed, so `>= 2.0` and `>=2.0` are the same tag.
 
 A bare version needs either a dot in the number itself or a `v` prefix, so `2026` is never guessed at: write `v2026` for the version and `2026-12` for the deadline. The dot has to be in the number, not in a pre-release suffix, so a one component pre-release is written `v2-rc.1` rather than `2-rc.1`. Only `>=` and `>` are supported. Writing `<1.0` to mean "before version 1.0" is a natural reach, and so is borrowing `^1.0` or `~1.0` from a package manager, but this tool has no way to fire on something it can never observe (a version that is never released, or one above a ceiling), so it reports those as invalid rather than quietly never firing.
 
