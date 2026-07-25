@@ -268,8 +268,8 @@ impl Constraint {
 /// `Constraint::parse` and [`UNSUPPORTED_COMPARATORS`].
 pub const COMPARATORS: [&str; 6] = [">=", "<=", "==", ">", "<", "="];
 
-/// Comparators phpstan-todo-by users bring over meaning "before version X"
-/// (`<1.0`, `<=1.0`, `=1.0`, `==1.0`). Silently treating them as unparsable
+/// Comparators that read as "before version X" (`<1.0`, `<=1.0`, `=1.0`,
+/// `==1.0`), a natural thing to reach for. Silently treating them as unparsable
 /// would be worse than useless: unlike a plain typo, these read as valid
 /// intent that would otherwise never fire, postponing the chore forever.
 /// Ordered longest-prefix-first so `==`/`<=` are found before `=`/`<`.

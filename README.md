@@ -120,7 +120,7 @@ The tag fires the moment the project's current version satisfies the constraint.
 | `>2.0` | fires once the current version is later than 2.0 |
 | `<`, `<=`, `=`, `==` | recognized but rejected as findings, not silently ignored |
 
-A bare version needs either a dot or a `v` prefix, so `2026` is never guessed at: write `v2026` for the version and `2026-12` for the deadline. Only `>=` and `>` are supported. Users coming from `phpstan-todo-by` sometimes write `<1.0` to mean "before version 1.0", but this tool has no way to fire on a date it can never observe (a version that's never released), so it reports those as invalid rather than quietly never firing.
+A bare version needs either a dot or a `v` prefix, so `2026` is never guessed at: write `v2026` for the version and `2026-12` for the deadline. Only `>=` and `>` are supported. Writing `<1.0` to mean "before version 1.0" is a natural reach, but this tool has no way to fire on something it can never observe (a version that is never released), so it reports those as invalid rather than quietly never firing.
 
 Unlike dates, `--warn` never applies to version triggers: a future version isn't knowable ahead of time the way a future date is.
 
