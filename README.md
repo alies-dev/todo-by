@@ -135,6 +135,8 @@ Unlike dates, `--warn` never applies to version triggers: a future version isn't
 
 `version-cmd` runs a shell command taken from the config file, so treat it the same as any other command a repository can make CI run, and only enable it in repositories you trust. It executes only when the scan actually finds a version tag, never on every run.
 
+Worth knowing where that command can come from: config discovery walks from the current directory upward, so the file that supplies `version-cmd` is not necessarily inside the repository being scanned. A `todo-by.toml` in a parent directory (or in your home directory) applies to everything below it. Use `--dump-config` to see which file won, and `--current-version` or `TODO_BY_VERSION` to bypass the config path entirely.
+
 #### version-cmd cookbook
 
 `todo-by` deliberately does not parse build manifests. Inferring a version from a build system is how a linter starts lying to you: a missing version fails loudly (exit 2), a wrongly guessed one silently changes when your tags fire. So the extraction stays a command you write and can verify.
