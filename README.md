@@ -79,15 +79,16 @@ Exit codes: `0` no findings (warnings alone still exit 0), `1` findings, `2` usa
 
 ### Dates
 
-Three precisions are supported. A tag becomes overdue the day its deadline is reached.
+Dates are written with dashes, to a month or to a day. A tag becomes overdue the day its deadline is reached.
 
 | Written as | Deadline |
 |---|---|
 | `2026-09-01` | that day |
 | `2026-09` | last day of that month |
-| `2026` | December 31 of that year |
 
-Impossible dates (for example `2026-02-30`) are reported as findings too, so typos cannot silently postpone a deadline forever.
+A month is the coarsest precision. A year on its own (`2026`) is not a deadline, because it cannot be told apart from a version constraint (see [Versions](#versions)); such a tag is reported as an error naming both replacements, `2026-12` or `v2026`. Impossible dates (for example `2026-02-30`) are reported as findings too, so typos cannot silently postpone a deadline forever.
+
+Dotted dates (`2026.09.01`) are read as versions, not dates.
 
 #### Warn ahead
 
@@ -103,21 +104,23 @@ In `--format github`, warnings render as `::warning` annotations instead of `::e
 
 ### Versions
 
-A tag can also fire once the project reaches a version, instead of a date. Write a comparator directly against a version number, with no space between them.
+A tag can also fire once the project reaches a version, instead of a date. Write the version on its own, or prefix it with a comparator (with no space between them).
 
 ```js
-// @todo-by >=2.0 drop legacy endpoint after v2 ships
+// @todo-by 2.0 drop legacy endpoint after v2 ships
+// @todo-by >2.0 drop it only after 2.0 itself is out
 ```
 
-The tag fires the moment the project's current version satisfies the constraint. A leading `v` on the version is optional and ignored (`>=v2.0` and `>=2.0` mean the same thing).
+The tag fires the moment the project's current version satisfies the constraint. A bare version means `>=`, which is what almost every cleanup tag wants. A leading lowercase `v` is optional and ignored (`v2.0`, `2.0`, and `>=v2.0` all mean the same thing; `V2.0` is reported as invalid rather than accepted as a second spelling), and calendar versions work as-is (`2026.01`).
 
-| Comparator | Meaning |
+| Written as | Meaning |
 |---|---|
-| `>=2.0` | fires once the current version is 2.0 or later |
+| `2.0`, `v2.0`, `>=2.0` | fires once the current version is 2.0 or later |
+| `2026.01` | fires once the current version is 2026.1 or later |
 | `>2.0` | fires once the current version is later than 2.0 |
 | `<`, `<=`, `=`, `==` | recognized but rejected as findings, not silently ignored |
 
-Only `>=` and `>` are supported. Users coming from `phpstan-todo-by` sometimes write `<1.0` to mean "before version 1.0", but this tool has no way to fire on a date it can never observe (a version that's never released), so it reports those as invalid rather than quietly never firing.
+A bare version needs either a dot or a `v` prefix, so `2026` is never guessed at: write `v2026` for the version and `2026-12` for the deadline. Only `>=` and `>` are supported. Users coming from `phpstan-todo-by` sometimes write `<1.0` to mean "before version 1.0", but this tool has no way to fire on a date it can never observe (a version that's never released), so it reports those as invalid rather than quietly never firing.
 
 Unlike dates, `--warn` never applies to version triggers: a future version isn't knowable ahead of time the way a future date is.
 

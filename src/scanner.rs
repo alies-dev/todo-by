@@ -142,7 +142,7 @@ fn match_line_from<'a>(
             if j == ws_start {
                 continue;
             }
-            if let Some(end) = parse_date_span(bytes, j) {
+            if let Some(end) = parse_bare_span(bytes, j) {
                 return Some((&line[j..end], clean_message(&line[end..]), end));
             }
             if let Some(end) = parse_version_span(bytes, j) {
@@ -156,29 +156,60 @@ fn match_line_from<'a>(
     None
 }
 
-/// Returns the end of the date-like token at `start`, or None when the tag
-/// has no date. Requires exactly four leading year digits (a fifth digit
-/// disqualifies the tag), then consumes the whole contiguous token (ASCII
-/// alphanumerics, '-', '/', '.') so malformed dates like `2026/01/05`,
-/// `2026-`, or `2026-09x` reach `date::deadline` intact and are reported
-/// invalid; truncating to a valid prefix would silently postpone the
-/// deadline. `trim_trailing_html_comment_dashes` then excludes an
+/// Returns the end of the bare (comparator-less) token at `start`, or None
+/// when the tag has neither a date nor a bare version. The two forms
+/// overlap enough (`2026-09` against `2026.01`) that one span parser
+/// covers both; `classify` splits them apart afterwards.
+///
+/// Committing rule: an optional `v`/`V` prefix, a run of digits, then
+/// either a `.` separator (a version: `0.2`, `2026.01`), a `-` separator
+/// after exactly four digits (a date: `2026-09`), or exactly four digits
+/// with no separator at all. That last case exists only so a v0.2-era
+/// year-only tag (a lone `2026`) still matches and is reported as an
+/// error rather than silently ignored. A tag followed by `2 things`,
+/// `12345`, or `12345-06` stays a non-match, the last one keeping
+/// five-digit years out of the date path exactly as the four-digit gate
+/// used to.
+///
+/// The `v` prefix waives the separator rule entirely (`v2026` and `v2` are
+/// versions) because it already rules out a date: nothing in the date
+/// syntax starts with a letter. It must be followed by a digit, so prose
+/// like `todo-by version 2` still doesn't match. An uppercase `V` is
+/// recognized here but rejected by `version::Version::parse`, on purpose:
+/// `V2.0` is not valid syntax, and matching it means saying so out loud
+/// instead of skipping the tag as if it were prose.
+///
+/// The whole contiguous token is then consumed (the union of the date and
+/// version charsets) so malformed input like `2026/01/05`, `2026-`,
+/// `2026-09x`, or `2026.0_rc` reaches its validator intact: truncating to
+/// a valid-looking prefix would silently postpone a deadline or weaken a
+/// constraint. `trim_trailing_html_comment_dashes` then excludes an
 /// immediately-following HTML comment closer's two hyphens from the token.
-fn parse_date_span(bytes: &[u8], start: usize) -> Option<usize> {
+fn parse_bare_span(bytes: &[u8], start: usize) -> Option<usize> {
     let mut j = start;
-    for _ in 0..4 {
-        if !bytes.get(j).is_some_and(u8::is_ascii_digit) {
-            return None;
-        }
+    let prefixed = bytes.get(j).is_some_and(|&b| matches!(b, b'v' | b'V'));
+    if prefixed {
         j += 1;
     }
-    if bytes.get(j).is_some_and(u8::is_ascii_digit) {
+    let digits_start = j;
+    while bytes.get(j).is_some_and(u8::is_ascii_digit) {
+        j += 1;
+    }
+    let digits = j - digits_start;
+    if digits == 0 {
         return None;
     }
-    while bytes
-        .get(j)
-        .is_some_and(|&b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'/' | b'.'))
-    {
+    if !prefixed {
+        match bytes.get(j) {
+            Some(b'.') => {}
+            Some(b'-') if digits == 4 => {}
+            _ if digits == 4 => {}
+            _ => return None,
+        }
+    }
+    while bytes.get(j).is_some_and(|&b| {
+        b.is_ascii_alphanumeric() || matches!(b, b'-' | b'/' | b'.' | b'+' | b'_')
+    }) {
         j += 1;
     }
     Some(trim_trailing_html_comment_dashes(bytes, j))
@@ -189,8 +220,8 @@ fn parse_date_span(bytes: &[u8], start: usize) -> Option<usize> {
 /// (no space) followed by a version-like token: the byte after the
 /// comparator, and its optional `v`/`V` prefix, must be an ASCII digit.
 /// That guards prose like `todo-by > out.txt` or `todo-by <PATHS>` from
-/// matching at all, the same way `parse_date_span` requires four leading
-/// digits before committing to "this is a date".
+/// matching at all, the same way `parse_bare_span` requires a digit run
+/// plus a separator before committing to "this is a trigger".
 ///
 /// Once a comparator commits, the version part is consumed whole (same
 /// rationale as dates): `>=2.x` must reach `version::Constraint::parse`
@@ -220,8 +251,8 @@ fn parse_version_span(bytes: &[u8], start: usize) -> Option<usize> {
 }
 
 /// Both `-` and `.` sit in the date and version charsets above, so a
-/// trigger written just before an HTML comment closer (`<!-- todo-by
-/// 2026-09-01--> ` or `<!-- todo-by >=2.0-->`, no space before `-->`) would
+/// trigger written just before an HTML comment closer (a tag reading
+/// `2026-09-01-->` or `>=2.0-->`, no space before `-->`) would
 /// otherwise eat the closer's two hyphens into the span itself, producing
 /// a bogus trailing `--` (an InvalidDate false positive, or a version
 /// pre-release of `-`). If the just-consumed span ends with `--` and the
@@ -290,17 +321,30 @@ pub fn scan_text(file_label: &str, text: &str, ctx: &ScanCtx, findings: &mut Vec
 }
 
 /// Classifies a matched trigger span, or returns None when there's nothing
-/// to report (a valid date outside today and the warn window). A date span
-/// always starts with a digit (`parse_date_span` requires four leading
-/// digits); a version span always starts with a comparator character, so
-/// the leading byte alone tells the two apart.
+/// to report (a valid date outside today and the warn window).
+///
+/// Three forms reach here, told apart without re-scanning the line. A span
+/// starting with neither a digit nor `v`/`V` came from
+/// `parse_version_span`, so it carries a comparator (`>=2.0`). The rest
+/// came from `parse_bare_span`: a `v` prefix always means a version
+/// (`v2026.01`), and without one the span is a version when it contains a
+/// `.` (`2026.01`) and a date otherwise (`2026-09`). `.` is tested before
+/// `-` so a bare pre-release like `2026.01-rc.1` stays a version instead
+/// of being read as a malformed date.
+///
+/// The split costs dotted dates: `2026.09.01` is a valid three-component
+/// version, so it is treated as one rather than as a mistyped date. Dates
+/// have to use dashes, which is the syntax the docs have always shown.
 fn classify(written: &str, ctx: &ScanCtx) -> Option<Kind> {
     // Non-empty by construction (both span parsers return >=1 byte spans);
     // indexing stays deliberate so a broken invariant panics loudly instead
     // of silently reclassifying an empty span.
     debug_assert!(!written.is_empty());
-    if written.as_bytes()[0].is_ascii_digit() {
-        match deadline(written) {
+    let first = written.as_bytes()[0];
+    let prefixed = matches!(first, b'v' | b'V');
+    let bare = prefixed || first.is_ascii_digit();
+    if bare && !prefixed && !written.contains('.') {
+        return match deadline(written) {
             None => Some(Kind::InvalidDate {
                 written: written.to_string(),
             }),
@@ -315,24 +359,28 @@ fn classify(written: &str, ctx: &ScanCtx) -> Option<Kind> {
                 }),
                 _ => None,
             },
-        }
-    } else {
-        // Warn-ahead never applies here: a future version isn't knowable at
-        // scan time, so there's no "due soon" analog. The scanner can't
-        // even tell Overdue from not-yet-reached without the current
-        // version (which it doesn't have); that's why every valid
-        // constraint becomes a VersionPending candidate for main.rs to
-        // resolve, unconditionally.
-        Some(match Constraint::parse(written) {
-            Some(constraint) => Kind::VersionPending {
-                written: written.to_string(),
-                constraint,
-            },
-            None => Kind::InvalidTrigger {
-                written: written.to_string(),
-            },
-        })
+        };
     }
+    // Warn-ahead never applies here: a future version isn't knowable at
+    // scan time, so there's no "due soon" analog. The scanner can't
+    // even tell Overdue from not-yet-reached without the current
+    // version (which it doesn't have); that's why every valid
+    // constraint becomes a VersionPending candidate for main.rs to
+    // resolve, unconditionally.
+    let parsed = if bare {
+        Constraint::parse_bare(written)
+    } else {
+        Constraint::parse(written)
+    };
+    Some(match parsed {
+        Some(constraint) => Kind::VersionPending {
+            written: written.to_string(),
+            constraint,
+        },
+        None => Kind::InvalidTrigger {
+            written: written.to_string(),
+        },
+    })
 }
 
 #[cfg(test)]
@@ -382,8 +430,8 @@ mod tests {
                 "delete deprecated endpoint",
             ),
             (
-                "-- todo-by 2999 drop unused index",
-                "2999",
+                "-- todo-by 2999-03 drop unused index",
+                "2999-03",
                 "drop unused index",
             ),
             (
@@ -659,6 +707,128 @@ mod tests {
     }
 
     #[test]
+    fn bare_versions_imply_ge() {
+        let todo_by_tags = todo_by();
+        let today = Date::new(2999, 1, 1).unwrap();
+        let c = ctx(today, None, &todo_by_tags);
+        for written in [
+            "0.2",
+            "2026.01",
+            "1.2.3",
+            "2026.01-rc.1",
+            "v2.0",
+            "v2026.01",
+            // A `v` prefix stands in for the separator rule: this is the
+            // one way to write a bare one-component constraint, since
+            // `2026` alone is a retired year-only deadline.
+            "v2026",
+        ] {
+            let line = format!("// todo-by {written} drop legacy");
+            let mut findings = Vec::new();
+            scan_text("f", &line, &c, &mut findings);
+            assert_eq!(findings.len(), 1, "{line:?}");
+            match &findings[0].kind {
+                Kind::VersionPending {
+                    written: w,
+                    constraint,
+                } => {
+                    assert_eq!(w, written, "{line:?}");
+                    assert_eq!(
+                        constraint,
+                        &Constraint::parse(&format!(">={written}")).unwrap(),
+                        "bare {written:?} must mean >={written}"
+                    );
+                }
+                _ => panic!("expected VersionPending for {line:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn year_only_deadlines_are_reported_not_reinterpreted() {
+        // 0.2 read a lone year as Dec 31 of that year. It's dropped rather
+        // than silently re-read as a one-component version constraint, so
+        // upgrading surfaces every such tag instead of quietly changing
+        // when it fires.
+        let todo_by_tags = todo_by();
+        let today = Date::new(2999, 1, 1).unwrap();
+        let c = ctx(today, None, &todo_by_tags);
+        let year = "2026";
+        let line = format!("// todo-by {year} clean this up");
+        let mut findings = Vec::new();
+        scan_text("f", &line, &c, &mut findings);
+        assert_eq!(findings.len(), 1);
+        match &findings[0].kind {
+            Kind::InvalidDate { written } => assert_eq!(written, "2026"),
+            _ => panic!("expected InvalidDate for a year-only tag"),
+        }
+    }
+
+    #[test]
+    fn bare_spans_need_a_separator_or_a_four_digit_year() {
+        let todo_by_tags = todo_by();
+        // No separator and not four digits: prose, not a trigger.
+        assert_eq!(match_line("// todo-by 2 things left", &todo_by_tags), None);
+        assert_eq!(match_line("// todo-by 12345 things", &todo_by_tags), None);
+        // Five-digit "year": kept out of the date path, as before.
+        assert_eq!(match_line("// todo-by 12345-06 nope", &todo_by_tags), None);
+        // A dot needs no four-digit run: that's the bare version form.
+        let bare = "0.2";
+        let line = format!("// todo-by {bare} drop it");
+        let (written, _) = match_line(&line, &todo_by_tags).unwrap();
+        assert_eq!(written, bare);
+    }
+
+    #[test]
+    fn v_prefix_waives_the_separator_rule_but_needs_a_digit() {
+        let todo_by_tags = todo_by();
+        let bare = "v2";
+        let line = format!("// todo-by {bare} drop it");
+        let (written, msg) = match_line(&line, &todo_by_tags).unwrap();
+        assert_eq!(written, bare);
+        assert_eq!(msg, "drop it");
+        // A letter after the `v` is prose, not a version.
+        assert_eq!(match_line("// todo-by version 2 soon", &todo_by_tags), None);
+        assert_eq!(match_line("// todo-by v soon", &todo_by_tags), None);
+    }
+
+    #[test]
+    fn uppercase_v_prefix_is_matched_then_rejected() {
+        // Only `v2.0` is valid syntax. `V2.0` is still matched as a
+        // version position so it's reported, not skipped as prose: a
+        // silently ignored tag never comes due.
+        let todo_by_tags = todo_by();
+        let today = Date::new(2999, 1, 1).unwrap();
+        let c = ctx(today, None, &todo_by_tags);
+        for written in ["V3.0", ">=V3.0"] {
+            let line = format!("// todo-by {written} drop it");
+            let mut findings = Vec::new();
+            scan_text("f", &line, &c, &mut findings);
+            assert_eq!(findings.len(), 1, "{line:?}");
+            match &findings[0].kind {
+                Kind::InvalidTrigger { written: w } => assert_eq!(w, written, "{line:?}"),
+                _ => panic!("expected InvalidTrigger for {line:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_dot_makes_it_a_version_a_dash_keeps_it_a_date() {
+        let todo_by_tags = todo_by();
+        let today = Date::new(2999, 1, 1).unwrap();
+        let c = ctx(today, None, &todo_by_tags);
+
+        let mut findings = Vec::new();
+        scan_text("f", "// todo-by 2998-01 dashed date", &c, &mut findings);
+        assert!(matches!(findings[0].kind, Kind::Overdue { .. }));
+
+        let mut findings = Vec::new();
+        let dotted = "2998.01";
+        scan_text("f", &format!("// todo-by {dotted}"), &c, &mut findings);
+        assert!(matches!(findings[0].kind, Kind::VersionPending { .. }));
+    }
+
+    #[test]
     fn comparator_followed_by_space_does_not_match() {
         let todo_by_tags = todo_by();
         let line = format!("// todo-by {} 2.0 drop it", ">=");
@@ -789,7 +959,8 @@ mod tests {
         let today = Date::new(2999, 1, 1).unwrap();
         let c = ctx(today, None, &todo_by_tags);
         let mut findings = Vec::new();
-        scan_text("f", "<!-- todo-by >=2.0-->", &c, &mut findings);
+        let ge = ">=2.0";
+        scan_text("f", &format!("<!-- todo-by {ge}-->"), &c, &mut findings);
         assert_eq!(findings.len(), 1);
         match &findings[0].kind {
             Kind::VersionPending { written, .. } => assert_eq!(written, ">=2.0"),

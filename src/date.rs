@@ -84,17 +84,18 @@ pub fn days_in_month(year: i32, month: u32) -> u32 {
     }
 }
 
-/// Deadline day for a written date: `2026` means Dec 31, `2026-09` means Sep 30.
-/// None for impossible dates like 2026-02-30 and for malformed tokens: a
-/// present-but-unparsable component (`2026-`, `2026-09x`) or trailing parts
-/// (`2026-1-2-3`) must not degrade to a shorter, later deadline.
+/// Deadline day for a written date: `2026-09` means Sep 30, `2026-09-01`
+/// that day. A month is the coarsest precision accepted; a year on its own
+/// (`2026`) is not a date, because a bare digit-leading token now reads as
+/// a version constraint (`2026.01`) and a lone year is indistinguishable
+/// from a one-component version. None for impossible dates like 2026-02-30
+/// and for malformed tokens: a present-but-unparsable component (`2026-`,
+/// `2026-09x`) or trailing parts (`2026-1-2-3`) must not degrade to a
+/// shorter, later deadline.
 pub fn deadline(written: &str) -> Option<Date> {
     let mut parts = written.split('-');
     let year: i32 = parts.next()?.parse().ok()?;
-    let month: u32 = match parts.next() {
-        None => return Date::new(year, 12, 31),
-        Some(m) => m.parse().ok()?,
-    };
+    let month: u32 = parts.next()?.parse().ok()?;
     let day: u32 = match parts.next() {
         None => return Date::new(year, month, days_in_month(year, month)),
         Some(d) => d.parse().ok()?,
@@ -124,7 +125,6 @@ mod tests {
 
     #[test]
     fn deadline_expands_partial_dates() {
-        assert_eq!(deadline("2026"), Some(date("2026-12-31")));
         assert_eq!(deadline("2026-02"), Some(date("2026-02-28")));
         assert_eq!(deadline("2024-02"), Some(date("2024-02-29")));
         assert_eq!(deadline("2026-07-09"), Some(date("2026-07-09")));
@@ -136,6 +136,14 @@ mod tests {
         assert_eq!(deadline("2026-02-30"), None);
         assert_eq!(deadline("2026-00-01"), None);
         assert_eq!(deadline("2026-123"), None);
+    }
+
+    #[test]
+    fn deadline_rejects_year_only() {
+        // A month is the coarsest precision: a lone year would be
+        // indistinguishable from a one-component version constraint.
+        assert_eq!(deadline("2026"), None);
+        assert_eq!(deadline("2026.01"), None);
     }
 
     #[test]

@@ -38,7 +38,12 @@ impl Version {
     /// `date::deadline`'s stance on malformed tokens: a typo should surface
     /// as an invalid trigger, not quietly mean something else.
     pub fn parse(s: &str) -> Option<Self> {
-        let s = s.strip_prefix(['v', 'V']).unwrap_or(s);
+        // Lowercase only: `v2.0` is the near-universal spelling, and
+        // accepting `V2.0` as well would mean two ways to write one thing
+        // for no gain. The scanner still recognizes an uppercase `V` as a
+        // version position, so `V2.0` fails here and is reported invalid
+        // rather than passing by unnoticed.
+        let s = s.strip_prefix('v').unwrap_or(s);
         let core_and_pre = match s.split_once('+') {
             Some((head, build)) => {
                 if !build.split('.').all(is_valid_identifier) {
@@ -202,7 +207,7 @@ pub enum Cmp {
     Gt,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Constraint {
     pub cmp: Cmp,
     pub version: Version,
@@ -223,6 +228,22 @@ impl Constraint {
         };
         let version = Version::parse(rest)?;
         Some(Constraint { cmp, version })
+    }
+
+    /// Parses a bare, comparator-less constraint (`0.2`, `2026.01`), which
+    /// means exactly what `>=` means: fire once the project reaches that
+    /// version. `>=` is what nearly every real tag wants, so it gets the
+    /// short spelling; anything else has to say so explicitly.
+    ///
+    /// The caller decides what may reach this: the scanner only routes
+    /// digit-leading spans that contain a `.`, which is what keeps a lone
+    /// year (`2026`) from quietly becoming a one-component version
+    /// constraint instead of the deadline it used to be.
+    pub fn parse_bare(written: &str) -> Option<Constraint> {
+        Some(Constraint {
+            cmp: Cmp::Ge,
+            version: Version::parse(written)?,
+        })
     }
 
     pub fn satisfied_by(&self, current: &Version) -> bool {
@@ -279,7 +300,12 @@ mod tests {
         assert!(Version::parse("2.0").is_some());
         assert!(Version::parse("2.0.5").is_some());
         assert!(Version::parse("v2.0.5").is_some());
-        assert!(Version::parse("V2.0.5").is_some());
+    }
+
+    #[test]
+    fn rejects_uppercase_v_prefix() {
+        assert!(Version::parse("V2.0.5").is_none());
+        assert!(Version::parse("V3").is_none());
     }
 
     #[test]
@@ -430,7 +456,7 @@ mod tests {
             "2.0.0-rc.1"
         );
         assert_eq!(
-            Version::parse("V3.4.5+build.1").unwrap().to_string(),
+            Version::parse("v3.4.5+build.1").unwrap().to_string(),
             "3.4.5"
         );
     }

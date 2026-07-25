@@ -76,10 +76,27 @@ fn invalid_trigger_message(written: &str) -> String {
     }
 }
 
+/// Message for an InvalidDate finding. A token of nothing but digits is a
+/// year-only deadline (a lone `2026`), which 0.2 accepted as Dec 31 of
+/// that year and 0.3 does not: a bare digit-leading token is a version
+/// now, and a lone year can't be told apart from a one-component version.
+/// Those tags get a migration hint naming both replacements instead of the
+/// generic wording, since the generic one would read as a typo report for
+/// something that used to be valid.
+fn invalid_date_message(written: &str) -> String {
+    if !written.is_empty() && written.bytes().all(|b| b.is_ascii_digit()) {
+        return format!(
+            "year-only deadline {written} is no longer supported \
+             (write {written}-12 for the end of that year, or v{written} for a version)"
+        );
+    }
+    format!("invalid date {written}")
+}
+
 fn render_text(f: &Finding, opts: &RenderOpts) -> String {
     let (phrase, color) = match &f.kind {
         Kind::Overdue { written, .. } => (format!("overdue since {written}"), RED),
-        Kind::InvalidDate { written } => (format!("invalid date {written}"), RED),
+        Kind::InvalidDate { written } => (invalid_date_message(written), RED),
         Kind::DueSoon { deadline, .. } => {
             let n = days_between(opts.today, *deadline);
             (format!("due in {} ({deadline})", plural_days(n)), YELLOW)
@@ -107,7 +124,10 @@ fn render_text(f: &Finding, opts: &RenderOpts) -> String {
 fn render_github(f: &Finding, today: Date, current_version: Option<&str>) -> String {
     let (command, title) = match &f.kind {
         Kind::Overdue { written, .. } => ("error", format!("todo-by overdue since {written}")),
-        Kind::InvalidDate { written } => ("error", format!("todo-by invalid date {written}")),
+        Kind::InvalidDate { written } => (
+            "error",
+            format!("todo-by {}", invalid_date_message(written)),
+        ),
         Kind::DueSoon { deadline, .. } => {
             let n = days_between(today, *deadline);
             (
