@@ -133,6 +133,28 @@ Unlike dates, `--warn` never applies to version triggers: a future version isn't
 
 `version-cmd` runs a shell command taken from the config file, so treat it the same as any other command a repository can make CI run, and only enable it in repositories you trust. It executes only when the scan actually finds a version tag, never on every run.
 
+#### version-cmd cookbook
+
+`todo-by` deliberately does not parse build manifests. Inferring a version from a build system is how a linter starts lying to you: a missing version fails loudly (exit 2), a wrongly guessed one silently changes when your tags fire. So the extraction stays a command you write and can verify.
+
+Anything printing the version on stdout works. Output is trimmed, and a leading `v` is stripped.
+
+| Version lives in | `version-cmd` |
+|---|---|
+| `package.json` | `jq -r .version package.json` |
+| `package.json`, without jq | `node -p "require('./package.json').version"` |
+| `Cargo.toml` | `cargo metadata --no-deps --format-version 1 \| jq -r .packages[0].version` |
+| `pyproject.toml` | `python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"` |
+| `pom.xml` | `mvn -q -DforceStdout help:evaluate -Dexpression=project.version` |
+| `gradle.properties` | `gradle -q properties \| awk '/^version:/ {print $2}'` |
+| `Chart.yaml` (Helm) | `yq -r .version Chart.yaml` |
+| A plain `VERSION` file | `cat VERSION` |
+| A key and value file (OpenSSL style) | `. ./VERSION.dat && echo "$MAJOR.$MINOR.$PATCH"` |
+
+Go and PHP projects usually keep no version in a manifest at all, so the git tag default already covers them. Nothing else needed.
+
+Two things worth checking when a recipe misbehaves: the command runs in the config file's directory (so relative paths resolve against the config file, not the invocation directory), and it must print the version alone, since the whole trimmed stdout is the version.
+
 In GitHub Actions, `actions/checkout` fetches no tags by default, so the git based default finds nothing to describe. Either set `fetch-depth: 0` or `fetch-tags: true` on the checkout step, or skip git entirely with `--current-version` or `TODO_BY_VERSION`.
 
 ## CI (GitHub Actions)
