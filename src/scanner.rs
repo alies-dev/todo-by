@@ -227,9 +227,15 @@ fn parse_bare_span(bytes: &[u8], start: usize) -> Option<usize> {
 /// Once a comparator commits, the version part is consumed whole (same
 /// rationale as dates): `>=2.x` must reach `version::Constraint::parse`
 /// intact and be reported invalid, not truncated to a valid-looking `>=2`.
-/// `_` is included alongside `.`, `-`, `+` in the consumed charset for the
-/// same reason: `>=2.0_rc.1` must reach the validator whole, not get cut
-/// to a valid-looking `>=2.0`.
+/// `_` and `/` are included alongside `.`, `-`, `+` in the consumed
+/// charset for the same reason: `>=2.0_rc.1` and `>=2.0/3.0` must reach
+/// the validator whole, not get cut to a valid-looking `>=2.0` whose
+/// discarded tail silently weakened the constraint.
+///
+/// Non-ASCII bytes deliberately end the span instead: `>=2.0完了` is a
+/// constraint followed by a message, the same way `2026-09-01完了` is a
+/// date followed by one, so a language that doesn't space after the
+/// trigger still works.
 fn parse_version_span(bytes: &[u8], start: usize) -> Option<usize> {
     let cmp_len = COMPARATORS
         .iter()
@@ -255,10 +261,9 @@ fn parse_version_span(bytes: &[u8], start: usize) -> Option<usize> {
     if !bytes.get(j).is_some_and(u8::is_ascii_digit) {
         return None;
     }
-    while bytes
-        .get(j)
-        .is_some_and(|&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+' | b'_'))
-    {
+    while bytes.get(j).is_some_and(|&b| {
+        b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'+' | b'_' | b'/')
+    }) {
         j += 1;
     }
     Some(trim_trailing_html_comment_dashes(bytes, j))
@@ -354,10 +359,23 @@ fn classify(written: &str, ctx: &ScanCtx) -> Option<Kind> {
     // indexing stays deliberate so a broken invariant panics loudly instead
     // of silently reclassifying an empty span.
     debug_assert!(!written.is_empty());
-    let first = written.as_bytes()[0];
-    let prefixed = matches!(first, b'v' | b'V');
-    let bare = prefixed || first.is_ascii_digit();
-    if bare && !prefixed && !written.contains('.') {
+    let bytes = written.as_bytes();
+    let prefixed = matches!(bytes[0], b'v' | b'V');
+    let bare = prefixed || bytes[0].is_ascii_digit();
+    // For a bare span the byte right after the leading digits picks the
+    // form, the same byte `parse_bare_span` committed on: `.` means a
+    // version (`2026.01`), anything else means a date (`2026-09`, and also
+    // `2026`, `2026+x`, `2026/01/05`, which then surface as malformed
+    // dates). Looking for a dot ANYWHERE instead would hand `2025-09.01`
+    // and `2025+note.txt` to the version parser, which reads them as a
+    // pre-release and as build metadata respectively; both then parse
+    // cleanly, go unsatisfied, and disappear. A mistyped deadline has to
+    // stay loud, so the dot only counts while it's still in the core.
+    let dotted_core = written
+        .bytes()
+        .position(|b| !b.is_ascii_digit())
+        .is_some_and(|i| bytes[i] == b'.');
+    if bare && !prefixed && !dotted_core {
         return match deadline(written) {
             None => Some(Kind::InvalidDate {
                 written: written.to_string(),
@@ -824,6 +842,61 @@ mod tests {
                 _ => panic!("expected InvalidTrigger for {line:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_dot_outside_the_core_does_not_turn_a_date_into_a_version() {
+        // Regression: routing on "contains a dot anywhere" sent these to
+        // the version parser, which reads `-09.01` as a pre-release and
+        // `+note.txt` as build metadata. Both parsed, went unsatisfied,
+        // and vanished, turning a mistyped deadline into silence.
+        let todo_by_tags = todo_by();
+        let today = Date::new(2999, 1, 1).unwrap();
+        let c = ctx(today, None, &todo_by_tags);
+        for written in [
+            "2025-09.01",
+            "2025-09-01.Please",
+            "2025+note.txt",
+            "2025/09/01",
+        ] {
+            let line = format!("// todo-by {written} cleanup");
+            let mut findings = Vec::new();
+            scan_text("f", &line, &c, &mut findings);
+            assert_eq!(findings.len(), 1, "{line:?}");
+            match &findings[0].kind {
+                Kind::InvalidDate { written: w } => assert_eq!(w, written, "{line:?}"),
+                _ => panic!("expected InvalidDate for {line:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_malformed_tail_cannot_truncate_a_constraint() {
+        // `>=2.0/3.0` must not be read as `>=2.0` with `/3.0` demoted to
+        // the message: a silently weakened constraint fires too early.
+        let todo_by_tags = todo_by();
+        let today = Date::new(2999, 1, 1).unwrap();
+        let c = ctx(today, None, &todo_by_tags);
+        let written = ">=2.0/3.0";
+        let line = format!("// todo-by {written} truncated");
+        let mut findings = Vec::new();
+        scan_text("f", &line, &c, &mut findings);
+        assert_eq!(findings.len(), 1);
+        match &findings[0].kind {
+            Kind::InvalidTrigger { written: w } => assert_eq!(w, written),
+            _ => panic!("expected InvalidTrigger, the tail must not be discarded"),
+        }
+    }
+
+    #[test]
+    fn non_ascii_text_ends_a_span_instead_of_corrupting_it() {
+        // Unlike `/`, a non-ASCII byte starts the message. Consuming it
+        // would break every language that doesn't put a space after the
+        // trigger.
+        let todo_by_tags = todo_by();
+        let (written, msg) = match_line("// todo-by 2999-01-01完了", &todo_by_tags).unwrap();
+        assert_eq!(written, "2999-01-01");
+        assert_eq!(msg, "完了");
     }
 
     #[test]

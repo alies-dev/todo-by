@@ -293,9 +293,15 @@ fn needs_version_resolution(findings: &[Finding]) -> bool {
 /// entire scan over someone else's tag capitalization trades a real
 /// report for a cosmetic objection.
 fn parse_current_version(raw: &str, label: &str) -> Result<Version, String> {
+    let invalid = || format!("current version {raw:?} from {label} is not a valid version");
     let normalized = raw.strip_prefix(['v', 'V']).unwrap_or(raw);
-    Version::parse(normalized)
-        .ok_or_else(|| format!("current version {raw:?} from {label} is not a valid version"))
+    // One prefix, not two: `Version::parse` strips a lowercase `v` of its
+    // own, so without this guard `vv2.0` and `Vv2.0` would each lose both
+    // and be accepted as 2.0.
+    if normalized.starts_with(['v', 'V']) {
+        return Err(invalid());
+    }
+    Version::parse(normalized).ok_or_else(invalid)
 }
 
 /// Directory `version-cmd` runs in: the loaded config file's directory,
@@ -1114,6 +1120,29 @@ mod tests {
             ">=2.0",
             "candidate"
         )]));
+    }
+
+    #[test]
+    fn resolved_versions_take_one_optional_v_prefix() {
+        // Lenient about case, since the string comes from a git tag or a
+        // command rather than from a tag someone wrote here.
+        for raw in ["2.0", "v2.0", "V2.0"] {
+            assert_eq!(
+                parse_current_version(raw, "--current-version")
+                    .unwrap()
+                    .to_string(),
+                "2.0",
+                "{raw:?}"
+            );
+        }
+        // But one prefix only: Version::parse strips a lowercase v too, so
+        // these would otherwise each shed both and be accepted.
+        for raw in ["vv2.0", "Vv2.0", "vV2.0"] {
+            assert!(
+                parse_current_version(raw, "--current-version").is_err(),
+                "{raw:?}"
+            );
+        }
     }
 
     #[test]

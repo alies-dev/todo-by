@@ -104,7 +104,7 @@ In `--format github`, warnings render as `::warning` annotations instead of `::e
 
 ### Versions
 
-A tag can also fire once the project reaches a version, instead of a date. Write the version on its own, or prefix it with a comparator (with no space between them).
+A tag can also fire once the project reaches a version, instead of a date. Write the version on its own, or prefix it with a comparator.
 
 ```js
 // @todo-by 2.0 drop legacy endpoint after v2 ships
@@ -122,7 +122,7 @@ The tag fires the moment the project's current version satisfies the constraint.
 
 A space after the comparator is allowed, so `>= 2.0` and `>=2.0` are the same tag. The version still has to look like one (a dot, a `v`, or a four digit year), which is what keeps prose such as `todo-by > 5 files left` from becoming a live constraint on version 5.
 
-A bare version needs either a dot or a `v` prefix, so `2026` is never guessed at: write `v2026` for the version and `2026-12` for the deadline. Only `>=` and `>` are supported. Writing `<1.0` to mean "before version 1.0" is a natural reach, and so is borrowing `^1.0` or `~1.0` from a package manager, but this tool has no way to fire on something it can never observe (a version that is never released, or one above a ceiling), so it reports those as invalid rather than quietly never firing.
+A bare version needs either a dot in the number itself or a `v` prefix, so `2026` is never guessed at: write `v2026` for the version and `2026-12` for the deadline. The dot has to be in the number, not in a pre-release suffix, so a one component pre-release is written `v2-rc.1` rather than `2-rc.1`. Only `>=` and `>` are supported. Writing `<1.0` to mean "before version 1.0" is a natural reach, and so is borrowing `^1.0` or `~1.0` from a package manager, but this tool has no way to fire on something it can never observe (a version that is never released, or one above a ceiling), so it reports those as invalid rather than quietly never firing.
 
 Unlike dates, `--warn` never applies to version triggers: a future version isn't knowable ahead of time the way a future date is.
 
@@ -139,7 +139,7 @@ Unlike dates, `--warn` never applies to version triggers: a future version isn't
 
 `todo-by` deliberately does not parse build manifests. Inferring a version from a build system is how a linter starts lying to you: a missing version fails loudly (exit 2), a wrongly guessed one silently changes when your tags fire. So the extraction stays a command you write and can verify.
 
-Anything printing the version on stdout works. Output is trimmed, and a leading `v` is stripped.
+Anything printing the version on stdout works. Output is trimmed, and a leading `v` is stripped. These recipes assume a POSIX shell, since `version-cmd` runs through `sh -c`; on Windows it runs through `cmd /C`, so `cat` becomes `type` and the sourcing trick at the bottom needs a `for /f` loop instead.
 
 | Version lives in | `version-cmd` |
 |---|---|
