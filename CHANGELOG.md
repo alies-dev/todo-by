@@ -17,7 +17,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Breaking.** A year on its own (a tag reading just `2026`) is no longer a deadline meaning December 31 of that year. Deadlines now need at least a month, written with dashes (`2026-12`). A bare digit-leading token reads as a version constraint now, and a lone year cannot be told apart from a one-component version. Existing year-only tags are reported as errors naming both replacements (`2026-12` for the deadline, `v2026` for the version), so upgrading surfaces every one of them instead of quietly changing when they fire.
 - Dotted dates (`2026.09.01`) are read as versions rather than as malformed dates. Dates use dashes.
-- **Breaking.** More broadly, any digit-leading token containing a dot is now a version constraint, so text that used to be ignored can become a finding. A tag reading `3.5 hours of work left` is a constraint on version 3.5, and `2.5x speedup` is an invalid one. Prose belongs after the trigger, not in its place.
 
 ## [0.2.1] - 2026-07-12
 
