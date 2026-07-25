@@ -37,6 +37,12 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          # Full history, not just the default shallow clone: as soon as any
+          # scanned file carries a version tag, the self-scan below resolves
+          # the current version with `git describe --tags --abbrev=0`, which
+          # needs a reachable tag that a depth-1 clone doesn't have. Cheap
+          # insurance, and it fails the whole job when it's missing.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo test --locked

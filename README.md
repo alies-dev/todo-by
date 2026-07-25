@@ -4,7 +4,7 @@
 [![crates.io](https://img.shields.io/crates/v/todo-by-cli.svg)](https://crates.io/crates/todo-by-cli)
 [![license](https://img.shields.io/crates/l/todo-by-cli.svg)](LICENSE)
 
-Flag `todo-by` tags whose deadline date has passed. Works on any file type. Tiny and lightning-fast. Respects your .gitignore.
+Flag `todo-by` tags whose deadline has passed, or whose target version has shipped. Works on any file type. Tiny and lightning-fast. Respects your .gitignore.
 
 ## Idea
 
@@ -64,6 +64,7 @@ todo-by --format text           # human-readable (default)
 todo-by --format github         # GitHub Actions annotations
 todo-by --format json           # JSON Lines, one object per finding
 todo-by --today 2026-12-31      # override "now" (useful for testing and CI dry runs)
+todo-by --current-version 2.1.0 # override the project's current version, for version triggers
 todo-by --warn 14               # also report tags due within 14 days, as warnings
 todo-by --exit-zero             # always exit 0 on findings (still 2 on errors)
 todo-by --color always          # auto, always, never (default: auto)
@@ -78,15 +79,16 @@ Exit codes: `0` no findings (warnings alone still exit 0), `1` findings, `2` usa
 
 ### Dates
 
-Three precisions are supported. A tag becomes overdue the day its deadline is reached.
+Dates are written with dashes, to a month or to a day. A tag becomes overdue the day its deadline is reached.
 
 | Written as | Deadline |
 |---|---|
 | `2026-09-01` | that day |
 | `2026-09` | last day of that month |
-| `2026` | December 31 of that year |
 
-Impossible dates (for example `2026-02-30`) are reported as findings too, so typos cannot silently postpone a deadline forever.
+A month is the coarsest precision. A year on its own (`2026`) is not a deadline, because it cannot be told apart from a version constraint (see [Versions](#versions)); such a tag is reported as an error naming both replacements, `2026-12` or `v2026`. Impossible dates (for example `2026-02-30`) are reported as findings too, so typos cannot silently postpone a deadline forever.
+
+Dotted dates (`2026.09.01`) are read as versions, not dates.
 
 #### Warn ahead
 
@@ -99,6 +101,65 @@ src/legacy.rs:8: due in 5 days (2026-07-14): drop the feature flag
 ```
 
 In `--format github`, warnings render as `::warning` annotations instead of `::error`.
+
+### Versions
+
+A tag can also fire once the project reaches a version, instead of a date. Write the version on its own, or prefix it with a comparator.
+
+```js
+// @todo-by 2.0 drop legacy endpoint after v2 ships
+// @todo-by >2.0 drop it only after 2.0 itself is out
+```
+
+The tag fires the moment the project's current version satisfies the constraint. A bare version means `>=`, which is what almost every cleanup tag wants. A leading lowercase `v` is optional and ignored (`v2.0`, `2.0`, and `>=v2.0` all mean the same thing; `V2.0` is reported as invalid rather than accepted as a second spelling), and calendar versions work as-is (`2026.01`).
+
+| Written as | Meaning |
+|---|---|
+| `2.0`, `v2.0`, `>=2.0`, `>= 2.0` | fires once the current version is 2.0 or later |
+| `2026.01` | fires once the current version is 2026.1 or later |
+| `>2.0` | fires once the current version is later than 2.0 |
+| `<`, `<=`, `=`, `==`, `^`, `~` | recognized but rejected as findings, not silently ignored |
+
+A space after the comparator is allowed, so `>= 2.0` and `>=2.0` are the same tag.
+
+A bare version needs either a dot in the number itself or a `v` prefix, so `2026` is never guessed at: write `v2026` for the version and `2026-12` for the deadline. The dot has to be in the number, not in a pre-release suffix, so a one component pre-release is written `v2-rc.1` rather than `2-rc.1`. Only `>=` and `>` are supported. Writing `<1.0` to mean "before version 1.0" is a natural reach, and so is borrowing `^1.0` or `~1.0` from a package manager, but this tool has no way to fire on something it can never observe (a version that is never released, or one above a ceiling), so it reports those as invalid rather than quietly never firing.
+
+Unlike dates, `--warn` never applies to version triggers: a future version isn't knowable ahead of time the way a future date is.
+
+`todo-by` resolves the current version once, only when the scan finds at least one version tag, in this order.
+
+1. `--current-version <X>` on the command line.
+2. The `TODO_BY_VERSION` environment variable.
+3. The `version-cmd` config key: a shell command whose trimmed stdout is the version, for example `version-cmd = "jq -r .version package.json"`. It runs in the config file's own directory, so a relative path (like `package.json` above) resolves against the file that declared it, not against wherever `todo-by` was invoked.
+4. `git describe --tags --abbrev=0`, with a leading `v` or `V` stripped. This runs in the directory `todo-by` was invoked in, not the config file's directory: git already walks upward on its own to find the repository, and a config file discovered above the actual repository (a monorepo layout, for example) would otherwise point git at the wrong one.
+
+`version-cmd` runs a shell command taken from the config file, so treat it the same as any other command a repository can make CI run, and only enable it in repositories you trust. It executes only when the scan actually finds a version tag, never on every run.
+
+Worth knowing where that command can come from: config discovery walks from the current directory upward, so the file that supplies `version-cmd` is not necessarily inside the repository being scanned. A `todo-by.toml` in a parent directory (or in your home directory) applies to everything below it. Use `--dump-config` to see which file won, and `--current-version` or `TODO_BY_VERSION` to bypass the config path entirely.
+
+#### version-cmd cookbook
+
+`todo-by` deliberately does not parse build manifests. Inferring a version from a build system is how a linter starts lying to you: a missing version fails loudly (exit 2), a wrongly guessed one silently changes when your tags fire. So the extraction stays a command you write and can verify.
+
+Anything printing the version on stdout works. Output is trimmed, and a leading `v` is stripped. These recipes assume a POSIX shell, since `version-cmd` runs through `sh -c`; on Windows it runs through `cmd /C`, so `cat` becomes `type` and the sourcing trick at the bottom needs a `for /f` loop instead.
+
+| Version lives in | `version-cmd` |
+|---|---|
+| `package.json` | `jq -r .version package.json` |
+| `package.json`, without jq | `node -p "require('./package.json').version"` |
+| `Cargo.toml` | `cargo metadata --no-deps --format-version 1 \| jq -r .packages[0].version` |
+| `pyproject.toml` | `python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"` |
+| `pom.xml` | `mvn -q -DforceStdout help:evaluate -Dexpression=project.version` |
+| `gradle.properties` | `gradle -q properties \| awk '/^version:/ {print $2}'` |
+| `Chart.yaml` (Helm) | `yq -r .version Chart.yaml` |
+| A plain `VERSION` file | `cat VERSION` |
+| A key and value file (OpenSSL style) | `. ./VERSION.dat && echo "$MAJOR.$MINOR.$PATCH"` |
+
+Go and PHP projects usually keep no version in a manifest at all, so the git tag default already covers them. Nothing else needed.
+
+Two things worth checking when a recipe misbehaves: the command runs in the config file's directory (so relative paths resolve against the config file, not the invocation directory), and it must print the version alone, since the whole trimmed stdout is the version.
+
+In GitHub Actions, `actions/checkout` fetches no tags by default, so the git based default finds nothing to describe. Set `fetch-depth: 0` on the checkout step, or skip git entirely with `--current-version` or `TODO_BY_VERSION`. Note that `fetch-tags: true` alone is not enough: it fetches the tag objects but leaves the clone shallow, so `git describe` still reports `No tags can describe` unless HEAD happens to be the tagged commit itself.
 
 ## CI (GitHub Actions)
 
@@ -141,19 +202,20 @@ Everything git would track. `todo-by` uses ripgrep's directory walker, so `.giti
 warn = 14
 exclude = ["vendor/**", "*.gen.go"]
 tags = ["todo-by", "fixme-by"]
+version-cmd = "jq -r .version package.json"
 ```
 
 - `warn` (integer): same as `--warn`.
 - `exclude` (array of strings): gitignore-style globs excluded in addition to `.gitignore`. Globs are matched relative to the directory where `todo-by` runs, like ripgrep's `--glob`.
 - `tags` (array of strings): tags to match, case-insensitive. Setting this replaces the default (`todo-by`) entirely rather than adding to it.
+- `version-cmd` (string): a shell command whose trimmed stdout is the current version, used to resolve version triggers (see [Versions](#versions)). It runs via `sh -c` (on Windows, `cmd /C`) in the config file's directory, so relative paths keep working when `todo-by` is invoked from a subdirectory.
 
-Precedence: command line flags win, then the `TODO_BY_FORMAT` / `TODO_BY_WARN` environment variables, then the config file.
+Precedence: command line flags win, then the `TODO_BY_FORMAT` / `TODO_BY_WARN` / `TODO_BY_VERSION` environment variables, then the config file.
 
 Use `--dump-config` to see the effective config and where it came from, and `--files` to see which files would be scanned.
 
 ## Roadmap
 
-- Package version trigger (`todo-by >=2.0`)
 - GitHub issue closed trigger (`todo-by #123`)
 
 ## Prior art

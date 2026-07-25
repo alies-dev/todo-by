@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Version triggers: a tag can fire when the project reaches a version instead of on a date. Write the version bare (a tag reading `2.0`, or `v2026.01` for calendar versions) to mean "that version or later", or with an explicit comparator (`>=2.0`, `>2.0`). `<`, `<=`, `=`, and `==` are recognized and reported as invalid rather than silently ignored, since this tool cannot fire on a version that is never released.
+- Current version resolution, run once per scan and only when a version tag is actually found: `--current-version`, then `TODO_BY_VERSION`, then the `version-cmd` config key (a shell command, run in the config file's directory), then `git describe --tags --abbrev=0`.
+- `version-cmd` config key, for projects whose version lives in `package.json`, `composer.json`, or anywhere else git tags do not cover.
+
+### Changed
+
+- **Breaking.** A year on its own (a tag reading just `2026`) is no longer a deadline meaning December 31 of that year. Deadlines now need at least a month, written with dashes (`2026-12`). A bare digit-leading token reads as a version constraint now, and a lone year cannot be told apart from a one-component version. Existing year-only tags are reported as errors naming both replacements (`2026-12` for the deadline, `v2026` for the version), so upgrading surfaces every one of them instead of quietly changing when they fire.
+- Dotted dates (`2026.09.01`) are read as versions rather than as malformed dates. Dates use dashes.
+
 ## [0.2.1] - 2026-07-12
 
 ### Added
