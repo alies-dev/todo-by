@@ -221,12 +221,13 @@ fn parse_bare_span(bytes: &[u8], start: usize) -> Option<usize> {
 }
 
 /// Returns the end of the `comparator + version` token at `start`, or None
-/// when there's no recognized comparator here, or it isn't immediately
-/// (no space) followed by a version-like token: the byte after the
-/// comparator, and its optional `v`/`V` prefix, must be an ASCII digit.
-/// That guards prose like `todo-by > out.txt` or `todo-by <PATHS>` from
-/// matching at all, the same way `parse_bare_span` requires a digit run
-/// plus a separator before committing to "this is a trigger".
+/// when there's no recognized comparator here, or it isn't followed by a
+/// version-like token: past any spaces, the next byte, and its optional
+/// `v`/`V` prefix, must be an ASCII digit. That guards prose like
+/// `todo-by > out.txt` or `todo-by <PATHS>` from matching at all, which is
+/// as far as the guard goes: a digit after a comparator always commits,
+/// because the comparator itself is the thing that says "version", and a
+/// tag carrying one is answered rather than dropped.
 ///
 /// The `v` marker is NOT required to match here, only to validate: an
 /// unmarked `>=2.0` is matched and handed to `classify`, which reports it
@@ -252,18 +253,17 @@ fn parse_version_span(bytes: &[u8], start: usize) -> Option<usize> {
         .find(|c| bytes[start..].starts_with(c.as_bytes()))?
         .len();
     let mut j = start + cmp_len;
-    // `>= 2.0` with a space is how package managers and people write it,
-    // so it's accepted, but only when what follows clears the stricter
-    // bare committing rule (a dot, a `v`, or a four-digit year). Without
-    // that gate, prose like `todo-by > 5 files left` would become a live
-    // constraint on version 5: the immediately-following-digit rule that
-    // protects the unspaced form stops protecting anything once a space is
-    // allowed through.
-    if bytes.get(j).is_some_and(|&b| matches!(b, b' ' | b'\t')) {
-        while bytes.get(j).is_some_and(|&b| matches!(b, b' ' | b'\t')) {
-            j += 1;
-        }
-        return parse_bare_span(bytes, j);
+    // `>= 2.0` with a space is how package managers and people write it, so
+    // the space is skipped and the spelling then commits on exactly the same
+    // rule as the unspaced one. It used to commit on the stricter bare rule
+    // instead (a dot, a `v`, or a four-digit year), which quietly made the
+    // space change the outcome: `>=2` was reported as an unmarked version
+    // while `>= 2` matched nothing at all and vanished. A comparator is
+    // already a strong enough signal on its own, which is why the unspaced
+    // form has always committed on a lone digit, and a tag whose author
+    // typed a comparator has to be answered either way.
+    while bytes.get(j).is_some_and(|&b| matches!(b, b' ' | b'\t')) {
+        j += 1;
     }
     if bytes.get(j).is_some_and(|&b| matches!(b, b'v' | b'V')) {
         j += 1;
@@ -975,7 +975,7 @@ mod tests {
     }
 
     #[test]
-    fn spaced_comparator_matches_only_when_the_version_clears_the_bare_rule() {
+    fn a_space_after_the_comparator_changes_nothing() {
         let todo_by_tags = todo_by();
         let today = Date::new(2999, 1, 1).unwrap();
         let c = ctx(today, None, &todo_by_tags);
@@ -1001,13 +1001,25 @@ mod tests {
             }
         }
 
-        // Prose: a bare number after a comparator is not a version, or the
-        // shell redirection in this project's own docs would become a tag.
-        for line in [
-            "// todo-by > 5 files left to migrate",
-            "// todo-by > out.txt",
-            "// todo-by >= 12345 items",
-        ] {
+        // The unmarked spellings are reported, not dropped, and the space
+        // makes no difference to that either. This is the pairing the rule
+        // turns on: `>=2` and `>= 2` are the same mistake, so a version of
+        // the parser that answered one and silently ignored the other would
+        // hide the tag from exactly the author who needed telling.
+        for written in [">=2", ">= 2", "> 2", ">= 12345"] {
+            let line = format!("// todo-by {written} drop it");
+            let mut findings = Vec::new();
+            scan_text("f", &line, &c, &mut findings);
+            assert_eq!(findings.len(), 1, "{line:?}");
+            match &findings[0].kind {
+                Kind::InvalidTrigger { written: w } => assert_eq!(w, written, "{line:?}"),
+                _ => panic!("expected InvalidTrigger for {line:?}"),
+            }
+        }
+
+        // Prose still needs a digit to commit, or the shell redirection in
+        // this project's own docs would become a tag.
+        for line in ["// todo-by > out.txt", "// todo-by <PATHS>"] {
             assert_eq!(match_line(line, &todo_by_tags), None, "{line:?}");
         }
     }
