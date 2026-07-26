@@ -301,7 +301,48 @@ fn parse_current_version(raw: &str, label: &str) -> Result<Version, String> {
     if normalized.starts_with(['v', 'V']) {
         return Err(invalid());
     }
-    Version::parse(normalized).ok_or_else(invalid)
+    Version::parse(strip_git_describe_markers(normalized)).ok_or_else(invalid)
+}
+
+/// Strips the markers `git describe` appends to a tag name when HEAD isn't
+/// the tagged commit (`-<n>-g<sha>`) or the tree is dirty (`-dirty`).
+///
+/// Semver reads either one as a pre-release, and a pre-release sorts BELOW
+/// the release it is built from, so `v1.2.3-4-gabc123` compares less than
+/// `1.2.3` and a `>=v1.2.3` trigger goes unreported: four commits PAST the
+/// tag would count as never having reached it. Nothing is printed when that
+/// happens, because an unsatisfied constraint has no finding to print, so
+/// the tag is simply buried. That silent drop is the outcome this tool
+/// exists to prevent, and it is reachable from any `version-cmd` or
+/// `--current-version` carrying describe's default output (the built-in
+/// `git describe --tags --abbrev=0` avoids the suffix, but a config saying
+/// `version-cmd = "git describe --tags"` does not). So the markers come off
+/// and the constraint is measured against the tag itself. A tag several
+/// commits behind still reads as reached, which under-reports `>` by one
+/// tag at worst and never hides a finding.
+///
+/// Deliberately narrow: only a trailing `-<digits>-g<hex>`, and only a
+/// literal trailing `-dirty`. A real pre-release keeps its suffix
+/// (`1.2.3-rc.1`), and describe run on a pre-release tag
+/// (`1.2.3-rc.1-4-gabc123`) falls back to that pre-release rather than to
+/// the release above it.
+fn strip_git_describe_markers(s: &str) -> &str {
+    let s = s.strip_suffix("-dirty").unwrap_or(s);
+    let Some((head, sha)) = s.rsplit_once('-') else {
+        return s;
+    };
+    let Some(hex) = sha.strip_prefix('g') else {
+        return s;
+    };
+    if hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return s;
+    }
+    match head.rsplit_once('-') {
+        Some((rest, count)) if !count.is_empty() && count.bytes().all(|b| b.is_ascii_digit()) => {
+            rest
+        }
+        _ => s,
+    }
 }
 
 /// Directory `version-cmd` runs in: the loaded config file's directory,
@@ -1140,6 +1181,48 @@ mod tests {
         for raw in ["vv2.0", "Vv2.0", "vV2.0"] {
             assert!(
                 parse_current_version(raw, "--current-version").is_err(),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn git_describe_markers_do_not_sink_the_version_below_its_tag() {
+        // Being past the tag must not read as not having reached it. Semver
+        // sorts a pre-release below its release, so without the strip these
+        // would each compare LESS than 1.2.3 and a `>=v1.2.3` tag would
+        // produce no finding at all.
+        for raw in [
+            "v1.2.3-4-gabc123",
+            "1.2.3-4-gabc123",
+            "v1.2.3-4-gabc123-dirty",
+            "v1.2.3-dirty",
+        ] {
+            let parsed = parse_current_version(raw, "--current-version").unwrap();
+            assert_eq!(parsed.to_string(), "1.2.3", "{raw:?}");
+            assert!(
+                crate::version::Constraint::parse(">=v1.2.3")
+                    .unwrap()
+                    .satisfied_by(&parsed),
+                "{raw:?}"
+            );
+        }
+
+        // A real pre-release keeps its suffix, including when describe ran
+        // on a pre-release tag: falling back to 1.2.3 there would claim a
+        // release the project hasn't cut.
+        for (raw, expected) in [
+            ("1.2.3-rc.1", "1.2.3-rc.1"),
+            ("v1.2.3-rc.1-4-gabc123", "1.2.3-rc.1"),
+            // Not describe output: no `g`, and a non-hex "sha".
+            ("1.2.3-4-abc123", "1.2.3-4-abc123"),
+            ("1.2.3-4-gxyz", "1.2.3-4-gxyz"),
+        ] {
+            assert_eq!(
+                parse_current_version(raw, "--current-version")
+                    .unwrap()
+                    .to_string(),
+                expected,
                 "{raw:?}"
             );
         }

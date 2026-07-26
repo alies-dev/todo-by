@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Version triggers: a tag can fire when the project reaches a version instead of on a date. Write the version with a lowercase `v` (`v2.0`, or `v2026.01` for calendar versions) to mean "that version or later", or with an explicit comparator (`>=v2.0`, `>v2.0`). `<`, `<=`, `=`, `==`, `^`, and `~` are recognized and reported as invalid rather than silently ignored, since this tool cannot fire on a version that is never released or one held below a ceiling.
-- Current version resolution, run once per scan and only when a version tag is actually found: `--current-version`, then `TODO_BY_VERSION`, then the `version-cmd` config key (a shell command, run in the config file's directory), then `git describe --tags --abbrev=0`.
+- Current version resolution, run once per scan and only when a version tag is actually found: `--current-version`, then `TODO_BY_VERSION`, then the `version-cmd` config key (a shell command, run in the config file's directory), then `git describe --tags --abbrev=0`. A resolved version keeps only its tag: the markers `git describe` adds for commits past the tag (`-4-gabc123`) and for a dirty tree (`-dirty`) are stripped, since semver reads them as a pre-release sorting below the release they came from, which would make a commit past `v1.2.3` count as never having reached it.
 - `version-cmd` config key, for projects whose version lives in `package.json`, `composer.json`, or anywhere else git tags do not cover.
 
 ### Changed
