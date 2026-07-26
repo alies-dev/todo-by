@@ -9,14 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Version triggers: a tag can fire when the project reaches a version instead of on a date. Write the version bare (a tag reading `2.0`, or `v2026.01` for calendar versions) to mean "that version or later", or with an explicit comparator (`>=2.0`, `>2.0`). `<`, `<=`, `=`, and `==` are recognized and reported as invalid rather than silently ignored, since this tool cannot fire on a version that is never released.
+- Version triggers: a tag can fire when the project reaches a version instead of on a date. Write the version with a lowercase `v` (`v2.0`, or `v2026.01` for calendar versions) to mean "that version or later", or with an explicit comparator (`>=v2.0`, `>v2.0`). `<`, `<=`, `=`, `==`, `^`, and `~` are recognized and reported as invalid rather than silently ignored, since this tool cannot fire on a version that is never released or one held below a ceiling.
 - Current version resolution, run once per scan and only when a version tag is actually found: `--current-version`, then `TODO_BY_VERSION`, then the `version-cmd` config key (a shell command, run in the config file's directory), then `git describe --tags --abbrev=0`.
 - `version-cmd` config key, for projects whose version lives in `package.json`, `composer.json`, or anywhere else git tags do not cover.
 
 ### Changed
 
 - **Breaking.** A year on its own (a tag reading just `2026`) is no longer a deadline meaning December 31 of that year. Deadlines now need at least a month, written with dashes (`2026-12`). A bare digit-leading token reads as a version constraint now, and a lone year cannot be told apart from a one-component version. Existing year-only tags are reported as errors naming both replacements (`2026-12` for the deadline, `v2026` for the version), so upgrading surfaces every one of them instead of quietly changing when they fire.
-- Dotted dates (`2026.09.01`) are read as versions rather than as malformed dates. Dates use dashes.
+- **Breaking.** A version written in a tag needs a lowercase `v`. A bare number (`2.0`, `>=2.0`, `2026.09.01`) is no longer a version trigger, and is reported as an error quoting the marked spelling to write instead. The marker is what separates a version from a date, and without it a tag sitting in prose reads two ways at once: `2026.09.01` is both a dotted deadline and a calendar version, `12.5.2026` is both a day-first date and a three-component version, `3.5` is both a constraint and the start of "3.5 hours of work". Guessing wrong on any of those fails silently, since a constraint the project never reaches produces no finding at all, which would bury the chore instead of surfacing it. Dates keep their own marking, the dashes they always had.
+- The current version is unaffected by that rule: `--current-version`, `TODO_BY_VERSION`, `version-cmd`, and `git describe` all still accept a bare `1.2.3`, since those strings come from the project rather than from a tag author.
 
 ## [0.2.1] - 2026-07-12
 

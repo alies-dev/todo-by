@@ -3,7 +3,7 @@
 
 use crate::date::Date;
 use crate::scanner::{Finding, Kind};
-use crate::version::unsupported_comparator;
+use crate::version::{missing_v_marker, unsupported_comparator};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Format {
@@ -64,16 +64,34 @@ fn plural_days(n: i64) -> String {
     format!("{n} day{}", if n == 1 { "" } else { "s" })
 }
 
-/// Message for an InvalidTrigger finding: names the unsupported comparator
-/// with a remedy hint when that's the cause, otherwise reports the
-/// constraint as generically invalid (bad version syntax).
+/// Message for an InvalidTrigger finding. Three causes, each named with its
+/// own way out: an unsupported comparator, a version written without the
+/// mandatory `v` marker, or syntax no marker would rescue. The missing
+/// marker is by far the likeliest of the three, since `2.0` is how versions
+/// are written everywhere else, so it quotes the exact replacement string
+/// rather than describing the rule.
 fn invalid_trigger_message(written: &str) -> String {
-    match unsupported_comparator(written) {
-        Some(cmp) => {
-            format!("unsupported comparator {cmp:?} (use >=X: fires once version reaches X)")
-        }
-        None => format!("invalid version constraint {written:?}"),
+    if let Some(cmp) = unsupported_comparator(written) {
+        return format!("unsupported comparator {cmp:?} (use >=vX: fires once version reaches X)");
     }
+    if let Some(fixed) = missing_v_marker(written) {
+        // Without a comparator the token could equally have been meant as a
+        // deadline (`2026.09.01` for `2026-09-01`), and that author is
+        // helped by the other half of the rule, not by being told to add a
+        // `v` to what they think is a date. A comparator rules that reading
+        // out, so the hint stays short there.
+        let alternative = if written.starts_with(['v', 'V'])
+            || written.starts_with(|c: char| c.is_ascii_digit())
+        {
+            ", or dashes for a deadline"
+        } else {
+            ""
+        };
+        return format!(
+            "version trigger {written:?} needs a lowercase v (write {fixed:?}{alternative})"
+        );
+    }
+    format!("invalid version constraint {written:?}")
 }
 
 /// Message for an InvalidDate finding. A token of nothing but digits is a
@@ -346,7 +364,7 @@ mod tests {
             file: "src/api.rs".to_string(),
             line: 30,
             kind: Kind::VersionReached {
-                written: ">=2.0".to_string(),
+                written: ">=v2.0".to_string(),
             },
             message: "drop legacy endpoint".to_string(),
         }
@@ -357,7 +375,7 @@ mod tests {
             file: "src/api.rs".to_string(),
             line: 31,
             kind: Kind::InvalidTrigger {
-                written: ">=2.x".to_string(),
+                written: ">=v2.x".to_string(),
             },
             message: "remove thing".to_string(),
         }
@@ -368,9 +386,20 @@ mod tests {
             file: "src/api.rs".to_string(),
             line: 32,
             kind: Kind::InvalidTrigger {
-                written: "<1.0".to_string(),
+                written: "<v1.0".to_string(),
             },
             message: "old behavior".to_string(),
+        }
+    }
+
+    fn missing_marker(line: usize, written: &str, message: &str) -> Finding {
+        Finding {
+            file: "src/api.rs".to_string(),
+            line,
+            kind: Kind::InvalidTrigger {
+                written: written.to_string(),
+            },
+            message: message.to_string(),
         }
     }
 
@@ -437,7 +466,7 @@ mod tests {
         let o = opts_with_version(Format::Text, "2.1.0");
         assert_eq!(
             render_finding(&version_reached(), &o),
-            "src/api.rs:30: version 2.1.0 reached (>=2.0): drop legacy endpoint"
+            "src/api.rs:30: version 2.1.0 reached (>=v2.0): drop legacy endpoint"
         );
     }
 
@@ -446,11 +475,35 @@ mod tests {
         let o = opts(Format::Text, false);
         assert_eq!(
             render_finding(&invalid_version_syntax(), &o),
-            "src/api.rs:31: invalid version constraint \">=2.x\": remove thing"
+            "src/api.rs:31: invalid version constraint \">=v2.x\": remove thing"
         );
         assert_eq!(
             render_finding(&unsupported_comparator_finding(), &o),
-            "src/api.rs:32: unsupported comparator \"<\" (use >=X: fires once version reaches X): old behavior"
+            "src/api.rs:32: unsupported comparator \"<\" (use >=vX: fires once version reaches X): old behavior"
+        );
+    }
+
+    #[test]
+    fn text_missing_marker_line_quotes_the_exact_replacement() {
+        let o = opts(Format::Text, false);
+        // No comparator: could have been meant as a deadline, so the hint
+        // names that way out too.
+        assert_eq!(
+            render_finding(&missing_marker(33, "2026.09.01", "drop the adapter"), &o),
+            "src/api.rs:33: version trigger \"2026.09.01\" needs a lowercase v \
+             (write \"v2026.09.01\", or dashes for a deadline): drop the adapter"
+        );
+        // A comparator rules out the date reading, so the hint stays short.
+        assert_eq!(
+            render_finding(&missing_marker(34, ">=2.0", "drop legacy"), &o),
+            "src/api.rs:34: version trigger \">=2.0\" needs a lowercase v \
+             (write \">=v2.0\"): drop legacy"
+        );
+        // An uppercase V failed on case alone; same remedy shape.
+        assert_eq!(
+            render_finding(&missing_marker(35, "V2.0", "casing"), &o),
+            "src/api.rs:35: version trigger \"V2.0\" needs a lowercase v \
+             (write \"v2.0\", or dashes for a deadline): casing"
         );
     }
 
@@ -528,7 +581,7 @@ mod tests {
         );
         assert_eq!(
             line,
-            "::error file=src/api.rs,line=30,title=todo-by version 2.1.0 reached (>=2.0)::drop legacy endpoint"
+            "::error file=src/api.rs,line=30,title=todo-by version 2.1.0 reached (>=v2.0)::drop legacy endpoint"
         );
         let line = render_finding(
             &unsupported_comparator_finding(),
@@ -538,7 +591,7 @@ mod tests {
             // The hint's own ':' goes through gh_escape_property like any
             // other title content, becoming %3A.
             line,
-            "::error file=src/api.rs,line=32,title=todo-by unsupported comparator \"<\" (use >=X%3A fires once version reaches X)::old behavior"
+            "::error file=src/api.rs,line=32,title=todo-by unsupported comparator \"<\" (use >=vX%3A fires once version reaches X)::old behavior"
         );
     }
 
@@ -577,7 +630,7 @@ mod tests {
         );
         assert_eq!(
             line,
-            "{\"type\":\"finding\",\"kind\":\"version-reached\",\"path\":\"src/api.rs\",\"line\":30,\"constraint\":\">=2.0\",\"current_version\":\"2.1.0\",\"message\":\"drop legacy endpoint\"}"
+            "{\"type\":\"finding\",\"kind\":\"version-reached\",\"path\":\"src/api.rs\",\"line\":30,\"constraint\":\">=v2.0\",\"current_version\":\"2.1.0\",\"message\":\"drop legacy endpoint\"}"
         );
     }
 
@@ -586,7 +639,7 @@ mod tests {
         let line = render_finding(&invalid_version_syntax(), &opts(Format::Json, false));
         assert_eq!(
             line,
-            "{\"type\":\"finding\",\"kind\":\"invalid-trigger\",\"path\":\"src/api.rs\",\"line\":31,\"constraint\":\">=2.x\",\"message\":\"remove thing\"}"
+            "{\"type\":\"finding\",\"kind\":\"invalid-trigger\",\"path\":\"src/api.rs\",\"line\":31,\"constraint\":\">=v2.x\",\"message\":\"remove thing\"}"
         );
     }
 

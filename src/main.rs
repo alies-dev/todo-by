@@ -1084,8 +1084,8 @@ mod tests {
     #[test]
     fn resolve_version_candidates_promotes_satisfied_and_drops_unsatisfied() {
         let mut findings = vec![
-            version_pending(">=2.0", "satisfied"),
-            version_pending(">=999.0", "not yet"),
+            version_pending(">=v2.0", "satisfied"),
+            version_pending(">=v999.0", "not yet"),
         ];
         let current = Version::parse("2.1.0").unwrap();
         resolve_version_candidates(&mut findings, &current);
@@ -1093,7 +1093,7 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].message, "satisfied");
         match &findings[0].kind {
-            scanner::Kind::VersionReached { written } => assert_eq!(written, ">=2.0"),
+            scanner::Kind::VersionReached { written } => assert_eq!(written, ">=v2.0"),
             _ => panic!("expected VersionReached"),
         }
     }
@@ -1108,7 +1108,7 @@ mod tests {
             file: "a.rs".to_string(),
             line: 1,
             kind: scanner::Kind::InvalidTrigger {
-                written: "<1.0".to_string(),
+                written: "<v1.0".to_string(),
             },
             message: "old".to_string(),
         }];
@@ -1117,7 +1117,7 @@ mod tests {
         assert!(!needs_version_resolution(&invalid_only));
         assert!(!needs_version_resolution(&[]));
         assert!(needs_version_resolution(&[version_pending(
-            ">=2.0",
+            ">=v2.0",
             "candidate"
         )]));
     }

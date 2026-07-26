@@ -88,7 +88,7 @@ Dates are written with dashes, to a month or to a day. A tag becomes overdue the
 
 A month is the coarsest precision. A year on its own (`2026`) is not a deadline, because it cannot be told apart from a version constraint (see [Versions](#versions)); such a tag is reported as an error naming both replacements, `2026-12` or `v2026`. Impossible dates (for example `2026-02-30`) are reported as findings too, so typos cannot silently postpone a deadline forever.
 
-Dotted dates (`2026.09.01`) are read as versions, not dates.
+Dates use dashes. A dotted date (`2026.09.01`) is reported as an error, because it reads equally as a calendar version (see [Versions](#versions)); the message names both spellings so you can pick one.
 
 #### Warn ahead
 
@@ -104,25 +104,31 @@ In `--format github`, warnings render as `::warning` annotations instead of `::e
 
 ### Versions
 
-A tag can also fire once the project reaches a version, instead of a date. Write the version on its own, or prefix it with a comparator.
+A tag can also fire once the project reaches a version, instead of a date. Write the version with a lowercase `v`, on its own or after a comparator.
 
 ```js
-// @todo-by 2.0 drop legacy endpoint after v2 ships
-// @todo-by >2.0 drop it only after 2.0 itself is out
+// @todo-by v2.0 drop legacy endpoint after v2 ships
+// @todo-by >v2.0 drop it only after 2.0 itself is out
 ```
 
-The tag fires the moment the project's current version satisfies the constraint. A bare version means `>=`, which is what almost every cleanup tag wants. A leading lowercase `v` is optional and ignored (`v2.0`, `2.0`, and `>=v2.0` all mean the same thing; `V2.0` is reported as invalid rather than accepted as a second spelling), and calendar versions work as-is (`2026.01`).
+The tag fires the moment the project's current version satisfies the constraint. A version without a comparator means `>=`, which is what almost every cleanup tag wants.
+
+**The `v` is required.** It is what tells a version from a date, so a tag is never guessed at: dates are the ones with dashes, versions are the ones with a `v`, and a number carrying neither marking is reported as an error naming the fix. That matters because a tag sits in prose, where an unmarked number reads two ways at once. `2026.09.01` is both a dotted deadline and a calendar version, `12.5.2026` is both a day first date and a three component version, and `3.5` is both a constraint and the start of "3.5 hours of work". Guessing at any of those risks the worst outcome this tool has: a guess of "version" produces a constraint the project never reaches, and an unreached constraint reports nothing at all, so the chore is buried instead of surfaced.
 
 | Written as | Meaning |
 |---|---|
-| `2.0`, `v2.0`, `>=2.0`, `>= 2.0` | fires once the current version is 2.0 or later |
-| `2026.01` | fires once the current version is 2026.1 or later |
-| `>2.0` | fires once the current version is later than 2.0 |
+| `v2.0`, `>=v2.0`, `>= v2.0` | fires once the current version is 2.0 or later |
+| `v2026.01` | calendar version, fires once the current version is 2026.1 or later |
+| `>v2.0` | fires once the current version is later than 2.0 |
+| `2.0`, `>=2.0`, `2026.09.01` | rejected, with the marked spelling as the fix |
+| `V2.0` | rejected, the marker is lowercase only |
 | `<`, `<=`, `=`, `==`, `^`, `~` | recognized but rejected as findings, not silently ignored |
 
-A space after the comparator is allowed, so `>= 2.0` and `>=2.0` are the same tag.
+A space after the comparator is allowed, so `>= v2.0` and `>=v2.0` are the same tag.
 
-A bare version needs either a dot in the number itself or a `v` prefix, so `2026` is never guessed at: write `v2026` for the version and `2026-12` for the deadline. The dot has to be in the number, not in a pre-release suffix, so a one component pre-release is written `v2-rc.1` rather than `2-rc.1`. Only `>=` and `>` are supported. Writing `<1.0` to mean "before version 1.0" is a natural reach, and so is borrowing `^1.0` or `~1.0` from a package manager, but this tool has no way to fire on something it can never observe (a version that is never released, or one above a ceiling), so it reports those as invalid rather than quietly never firing.
+The current version is a separate matter: `--current-version`, `TODO_BY_VERSION`, `version-cmd`, and `git describe` all accept a bare `1.2.3`, since those strings come from the project rather than from a tag author. The marker is required only where the ambiguity exists, which is inside the tag.
+
+Only `>=` and `>` are supported. Writing `<v1.0` to mean "before version 1.0" is a natural reach, and so is borrowing `^v1.0` or `~v1.0` from a package manager, but this tool has no way to fire on something it can never observe (a version that is never released, or one above a ceiling), so it reports those as invalid rather than quietly never firing.
 
 Unlike dates, `--warn` never applies to version triggers: a future version isn't knowable ahead of time the way a future date is.
 

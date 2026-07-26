@@ -1,5 +1,9 @@
 //! Semantic-version-shaped parsing and comparison for version-constraint
-//! triggers, e.g. a tag written `>=2.0` firing once the project reaches 2.0.
+//! triggers, e.g. a tag written `>=v2.0` firing once the project reaches 2.0.
+//!
+//! Versions written in a tag carry a mandatory `v` marker; versions the
+//! tool resolves for itself (a git tag, a `version-cmd`) do not. See
+//! [`marked_version`] for the split.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -214,38 +218,40 @@ pub struct Constraint {
 }
 
 impl Constraint {
-    /// Parses a comparator-prefixed constraint such as `>=2.0` or
-    /// `>1.4.0-rc.1`. Only `>=` and `>` are recognized here; `<`, `<=`, `=`,
+    /// Parses a comparator-prefixed constraint such as `>=v2.0` or
+    /// `>v1.4.0-rc.1`. Only `>=` and `>` are recognized here; `<`, `<=`, `=`,
     /// and `==` are syntactically version-like but return `None` because
     /// this tool has no "before version X" semantics to give them (see
     /// [`unsupported_comparator`] for surfacing that distinctly from a
     /// plain parse failure).
+    ///
+    /// The `v` is required, same as in [`Constraint::parse_bare`]; see
+    /// [`marked_version`] for why.
     pub fn parse(written: &str) -> Option<Constraint> {
         let (cmp, rest) = if let Some(rest) = written.strip_prefix(">=") {
             (Cmp::Ge, rest)
         } else {
             (Cmp::Gt, written.strip_prefix('>')?)
         };
-        // `rest` may carry the space from a `>= 2.0` spelling, which the
+        // `rest` may carry the space from a `>= v2.0` spelling, which the
         // scanner accepts (see its `parse_version_span`).
-        let version = Version::parse(rest.trim_start())?;
+        let version = marked_version(rest.trim_start())?;
         Some(Constraint { cmp, version })
     }
 
-    /// Parses a bare, comparator-less constraint (`0.2`, `2026.01`), which
-    /// means exactly what `>=` means: fire once the project reaches that
-    /// version. `>=` is what nearly every real tag wants, so it gets the
-    /// short spelling; anything else has to say so explicitly.
+    /// Parses a comparator-less constraint (`v2.0`, `v2026.01`), which means
+    /// exactly what `>=` means: fire once the project reaches that version.
+    /// `>=` is what nearly every real tag wants, so it gets the short
+    /// spelling; anything else has to say so explicitly.
     ///
-    /// The caller decides what may reach this: the scanner routes
-    /// `v`-prefixed spans plus digit-leading spans that contain a `.`. A
-    /// lone `2026` matches neither, which is what keeps it from quietly
-    /// becoming a one-component version constraint instead of the deadline
-    /// it used to be; `v2026` is the way to ask for that constraint.
+    /// Still requires the `v` (see [`marked_version`]), so a digit-leading
+    /// token never reaches a `Constraint` at all. The scanner routes those
+    /// here anyway, precisely so this rejects them and they surface as
+    /// invalid triggers rather than going unreported.
     pub fn parse_bare(written: &str) -> Option<Constraint> {
         Some(Constraint {
             cmp: Cmp::Ge,
-            version: Version::parse(written)?,
+            version: marked_version(written)?,
         })
     }
 
@@ -255,6 +261,70 @@ impl Constraint {
             Cmp::Gt => current > &self.version,
         }
     }
+}
+
+/// Parses a version written in a tag, where the leading `v` is mandatory:
+/// `v2.0` yes, `2.0` no.
+///
+/// The marker is what makes a trigger self-describing. A tag sits in prose,
+/// next to a sentence, so an unmarked number is ambiguous three ways at
+/// once: `2026.09.01` reads as both a dotted deadline and a calendar
+/// version, `3.5` reads as both a constraint and the start of "3.5 hours of
+/// work", and `12.5.2026` reads as a day-first date and a three-component
+/// version. Every one of those needs a rule to resolve, and a rule that
+/// guesses wrong either fires a tag nobody wrote or, worse, quietly holds
+/// one back. Requiring the marker deletes the whole class: dates are the
+/// ones with dashes, versions are the ones with a `v`, and anything else is
+/// reported so the author can say which they meant.
+///
+/// Deliberately NOT applied to a resolved current version. Those come from
+/// `git describe`, a `version-cmd`, `TODO_BY_VERSION`, or
+/// `--current-version`, none of which the tag author controls, and where a
+/// bare `1.2.3` is the norm. `main.rs` calls [`Version::parse`] directly for
+/// that path, which keeps the `v` optional.
+fn marked_version(written: &str) -> Option<Version> {
+    // Checked here, then handed on WITH the `v` still attached, since
+    // `Version::parse` strips one itself. Stripping it here too would let
+    // `vv2.0` through: this check would see the first `v`, and the parser
+    // would eat the second.
+    if !written.starts_with('v') {
+        return None;
+    }
+    Version::parse(written)
+}
+
+/// The correctly marked spelling of a trigger written without a usable `v`,
+/// when such a spelling exists: `2.0` -> `v2.0`, `>=2.0` -> `>=v2.0`,
+/// `>= 2.0` -> `>= v2.0`, and an uppercase `V2.0` -> `v2.0`. Returns None
+/// when adding the marker wouldn't help anyway (`>=2.x`, `2.0.5.1`), so
+/// those keep the generic invalid-constraint wording instead of being told
+/// to write something that is also invalid.
+///
+/// Unsupported comparators are excluded because they have their own, more
+/// specific remedy: `<2.0` is not one `v` away from working.
+pub fn missing_v_marker(written: &str) -> Option<String> {
+    if unsupported_comparator(written).is_some() {
+        return None;
+    }
+    let at = written.bytes().position(|b| b.is_ascii_digit())?;
+    let head = &written[at.saturating_sub(1)..at];
+    // A correctly placed lowercase `v` means the marker isn't what's wrong
+    // here, so say nothing and let the generic wording take it. Covers both
+    // an already-marked token whose version is malformed (`>=v2.x`) and a
+    // doubled marker (`vv2.0`), neither of which another `v` would fix.
+    if head == "v" {
+        return None;
+    }
+    // Everything before the first digit is a comparator, any spaces after
+    // it, and possibly a `v` that failed only by being uppercase.
+    let head = written[..at].trim_end_matches(['v', 'V']);
+    let fixed = format!("{head}v{}", &written[at..]);
+    let usable = if head.is_empty() {
+        Constraint::parse_bare(&fixed).is_some()
+    } else {
+        Constraint::parse(&fixed).is_some()
+    };
+    usable.then_some(fixed)
 }
 
 /// All comparators the scanner should recognize as "this position might be
@@ -420,34 +490,88 @@ mod tests {
 
     #[test]
     fn constraint_parses_ge_and_gt_only() {
-        let c = Constraint::parse(">=2.0").unwrap();
+        let c = Constraint::parse(">=v2.0").unwrap();
         assert_eq!(c.cmp, Cmp::Ge);
         assert_eq!(c.version, v("2.0"));
 
-        let c = Constraint::parse(">1.4.0-rc.1").unwrap();
+        let c = Constraint::parse(">v1.4.0-rc.1").unwrap();
         assert_eq!(c.cmp, Cmp::Gt);
         assert_eq!(c.version, v("1.4.0-rc.1"));
 
-        assert!(Constraint::parse("<1.0").is_none());
-        assert!(Constraint::parse("<=1.0").is_none());
-        assert!(Constraint::parse("=1.0").is_none());
-        assert!(Constraint::parse("==1.0").is_none());
+        assert!(Constraint::parse("<v1.0").is_none());
+        assert!(Constraint::parse("<=v1.0").is_none());
+        assert!(Constraint::parse("=v1.0").is_none());
+        assert!(Constraint::parse("==v1.0").is_none());
     }
 
     #[test]
     fn constraint_parse_rejects_malformed_version_after_valid_comparator() {
-        assert!(Constraint::parse(">=2.x").is_none());
+        assert!(Constraint::parse(">=v2.x").is_none());
         assert!(Constraint::parse(">=").is_none());
     }
 
     #[test]
+    fn constraint_requires_the_v_marker() {
+        // The whole disambiguation rule: an unmarked number is never a
+        // constraint, in either spelling.
+        assert!(Constraint::parse_bare("2.0").is_none());
+        assert!(Constraint::parse_bare("2026.01").is_none());
+        assert!(Constraint::parse(">=2.0").is_none());
+        assert!(Constraint::parse(">2.0").is_none());
+        assert!(Constraint::parse(">= 2.0").is_none());
+        // Lowercase only, and only one of them: `Version::parse` strips a
+        // `v` itself, so the marker check must not strip a second.
+        assert!(Constraint::parse_bare("V2.0").is_none());
+        assert!(Constraint::parse_bare("vv2.0").is_none());
+        // Marked spellings, including the spaced comparator form.
+        assert!(Constraint::parse_bare("v2.0").is_some());
+        assert!(Constraint::parse(">=v2.0").is_some());
+        assert!(Constraint::parse(">= v2.0").is_some());
+    }
+
+    #[test]
+    fn resolved_current_versions_do_not_need_the_marker() {
+        // `--current-version`, `TODO_BY_VERSION`, `version-cmd`, and `git
+        // describe` all produce strings the tag author doesn't control, and
+        // a bare `1.2.3` is the norm there. main.rs parses those with
+        // `Version::parse`, which must stay marker-optional.
+        assert!(Version::parse("1.2.3").is_some());
+        assert!(Version::parse("v1.2.3").is_some());
+    }
+
+    #[test]
+    fn missing_v_marker_names_the_fix_only_when_one_exists() {
+        assert_eq!(missing_v_marker("2.0").as_deref(), Some("v2.0"));
+        assert_eq!(
+            missing_v_marker("2026.09.01").as_deref(),
+            Some("v2026.09.01")
+        );
+        assert_eq!(missing_v_marker(">=2.0").as_deref(), Some(">=v2.0"));
+        assert_eq!(missing_v_marker(">2.0").as_deref(), Some(">v2.0"));
+        assert_eq!(missing_v_marker(">= 2.0").as_deref(), Some(">= v2.0"));
+        // An uppercase V failed only on case, so the fix is still a marker.
+        assert_eq!(missing_v_marker("V2.0").as_deref(), Some("v2.0"));
+        assert_eq!(missing_v_marker(">=V2.0").as_deref(), Some(">=v2.0"));
+        // Already marked, so a different error entirely.
+        assert_eq!(missing_v_marker("v2.0"), None);
+        // No marker would rescue these, so they keep the generic wording
+        // rather than being told to write something also invalid.
+        assert_eq!(missing_v_marker("2.0.5.1"), None, "four components");
+        assert_eq!(missing_v_marker(">=2.x"), None);
+        assert_eq!(missing_v_marker("2.0_rc"), None);
+        // Unsupported comparators have their own, more specific remedy.
+        assert_eq!(missing_v_marker("<1.0"), None);
+        assert_eq!(missing_v_marker("^1.0"), None);
+    }
+
+    #[test]
     fn satisfied_by_uses_the_right_comparator() {
-        let ge = Constraint::parse(">=2.0").unwrap();
+        let ge = Constraint::parse(">=v2.0").unwrap();
         assert!(ge.satisfied_by(&v("2.0")));
         assert!(ge.satisfied_by(&v("2.0.5")));
         assert!(!ge.satisfied_by(&v("1.9.9")));
 
-        let gt = Constraint::parse(">2.0").unwrap();
+        let gt = Constraint::parse(">v2.0").unwrap();
         assert!(!gt.satisfied_by(&v("2.0")));
         assert!(gt.satisfied_by(&v("2.0.1")));
     }

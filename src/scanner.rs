@@ -36,8 +36,9 @@ pub enum Kind {
     VersionReached {
         written: String,
     },
-    /// Bad version syntax, or a syntactically version-like but unsupported
-    /// comparator (`<`, `<=`, `=`, `==`).
+    /// A version-shaped trigger that can't be acted on: bad syntax, a
+    /// missing `v` marker (`2.0`, `>=2.0`), or an unsupported comparator
+    /// (`<`, `<=`, `=`, `==`, `^`, `~`).
     InvalidTrigger {
         written: String,
     },
@@ -156,29 +157,32 @@ fn match_line_from<'a>(
     None
 }
 
-/// Returns the end of the bare (comparator-less) token at `start`, or None
-/// when the tag has neither a date nor a bare version. The two forms
-/// overlap enough (`2026-09` against `2026.01`) that one span parser
+/// Returns the end of the comparator-less token at `start`, or None when
+/// the tag has neither a date nor a `v`-marked version. The two forms
+/// overlap enough (`2026-09` against `v2026.01`) that one span parser
 /// covers both; `classify` splits them apart afterwards.
 ///
-/// Committing rule: an optional `v`/`V` prefix, a run of digits, then
-/// either a `.` separator (a version: `0.2`, `2026.01`), a `-` separator
-/// after exactly four digits (a date: `2026-09`), or exactly four digits
-/// with no separator at all. That last case commits on four digits plus
-/// anything, which is what keeps both a v0.2-era year-only tag (a lone
-/// `2026`) and a malformed one (`2026/01/05`) matched and reported as
-/// errors rather than silently ignored. A tag followed by `2 things`,
-/// `12345`, or `12345-06` stays a non-match, the last one keeping
-/// five-digit years out of the date path exactly as the four-digit gate
-/// used to.
+/// Matching is deliberately wider than what actually validates. This
+/// commits on an optional `v`/`V` marker, a run of digits, then either a
+/// `.` separator (`2.0`, `2026.01`), a `-` separator after exactly four
+/// digits (a date: `2026-09`), or exactly four digits followed by
+/// anything. Several of those shapes are no longer legal triggers at all,
+/// since a version now needs the `v` marker and a date needs dashes. They
+/// are matched anyway so `classify` can report them: an unmarked `2.0` or
+/// a lone `2026` is far more likely a tag written the old way than prose,
+/// and the entire point of the marker rule is that such a tag gets an
+/// error rather than silence. A tag followed by `2 things`, `12345`, or
+/// `12345-06` stays a non-match, the last one keeping five-digit years
+/// out of the date path exactly as the four-digit gate used to.
 ///
-/// The `v` prefix waives the separator rule entirely (`v2026` and `v2` are
+/// The `v` marker waives the separator rule entirely (`v2026` and `v2` are
 /// versions) because it already rules out a date: nothing in the date
 /// syntax starts with a letter. It must be followed by a digit, so prose
 /// like `todo-by version 2` still doesn't match. An uppercase `V` is
-/// recognized here but rejected by `version::Version::parse`, on purpose:
-/// `V2.0` is not valid syntax, and matching it means saying so out loud
-/// instead of skipping the tag as if it were prose.
+/// recognized here but rejected downstream, on purpose: `V2.0` is not
+/// valid syntax, and matching it means saying so out loud (with the
+/// lowercase spelling as the remedy) instead of skipping the tag as if it
+/// were prose.
 ///
 /// The whole contiguous token is then consumed (the union of the date and
 /// version charsets) so malformed input like `2026/01/05`, `2026-`,
@@ -224,15 +228,21 @@ fn parse_bare_span(bytes: &[u8], start: usize) -> Option<usize> {
 /// matching at all, the same way `parse_bare_span` requires a digit run
 /// plus a separator before committing to "this is a trigger".
 ///
-/// Once a comparator commits, the version part is consumed whole (same
-/// rationale as dates): `>=2.x` must reach `version::Constraint::parse`
-/// intact and be reported invalid, not truncated to a valid-looking `>=2`.
-/// `_` and `/` are included alongside `.`, `-`, `+` in the consumed
-/// charset for the same reason: `>=2.0_rc.1` and `>=2.0/3.0` must reach
-/// the validator whole, not get cut to a valid-looking `>=2.0` whose
-/// discarded tail silently weakened the constraint.
+/// The `v` marker is NOT required to match here, only to validate: an
+/// unmarked `>=2.0` is matched and handed to `classify`, which reports it
+/// with the marked spelling as the remedy. Requiring the marker at match
+/// time would drop the most common way to get this wrong on the floor
+/// without a word.
 ///
-/// Non-ASCII bytes deliberately end the span instead: `>=2.0完了` is a
+/// Once a comparator commits, the version part is consumed whole (same
+/// rationale as dates): `>=v2.x` must reach `version::Constraint::parse`
+/// intact and be reported invalid, not truncated to a valid-looking
+/// `>=v2`. `_` and `/` are included alongside `.`, `-`, `+` in the
+/// consumed charset for the same reason: `>=v2.0_rc.1` and `>=v2.0/3.0`
+/// must reach the validator whole, not get cut to a valid-looking `>=v2.0`
+/// whose discarded tail silently weakened the constraint.
+///
+/// Non-ASCII bytes deliberately end the span instead: `>=v2.0完了` is a
 /// constraint followed by a message, the same way `2026-09-01完了` is a
 /// date followed by one, so a language that doesn't space after the
 /// trigger still works.
@@ -344,16 +354,19 @@ pub fn scan_text(file_label: &str, text: &str, ctx: &ScanCtx, findings: &mut Vec
 ///
 /// Three forms reach here, told apart without re-scanning the line. A span
 /// starting with neither a digit nor `v`/`V` came from
-/// `parse_version_span`, so it carries a comparator (`>=2.0`). The rest
-/// came from `parse_bare_span`: a `v` prefix always means a version
-/// (`v2026.01`), and without one the span is a version when it contains a
-/// `.` (`2026.01`) and a date otherwise (`2026-09`). Only `.` is tested,
-/// not `-`, which is what keeps a bare pre-release like `2026.01-rc.1` a
-/// version instead of a malformed date.
+/// `parse_version_span`, so it carries a comparator (`>=v2.0`). The rest
+/// came from `parse_bare_span`: a `v` marker means a version (`v2026.01`),
+/// and without one the span goes to the date parser when its digits run
+/// into a `-` or nothing (`2026-09`, `2026`) and to the version parser
+/// when they run into a `.` (`2.0`, `2026.01`).
 ///
-/// The split costs dotted dates: `2026.09.01` is a valid three-component
-/// version, so it is treated as one rather than as a mistyped date. Dates
-/// have to use dashes, which is the syntax the docs have always shown.
+/// That last route always ends in a rejection, since
+/// `version::Constraint` requires the marker, and that is the point: an
+/// unmarked dotted number is exactly the shape that reads as two things at
+/// once, so it earns an error naming the marked spelling rather than a
+/// guess in either direction. Only `.` is tested, not `-`, so `2025-09.01`
+/// and `2025+note.txt` stay on the date path and surface as malformed
+/// dates instead of parsing cleanly as a pre-release or as build metadata.
 fn classify(written: &str, ctx: &ScanCtx) -> Option<Kind> {
     // Non-empty by construction (both span parsers return >=1 byte spans);
     // indexing stays deliberate so a broken invariant panics loudly instead
@@ -362,15 +375,16 @@ fn classify(written: &str, ctx: &ScanCtx) -> Option<Kind> {
     let bytes = written.as_bytes();
     let prefixed = matches!(bytes[0], b'v' | b'V');
     let bare = prefixed || bytes[0].is_ascii_digit();
-    // For a bare span the byte right after the leading digits picks the
-    // form, the same byte `parse_bare_span` committed on: `.` means a
-    // version (`2026.01`), anything else means a date (`2026-09`, and also
-    // `2026`, `2026+x`, `2026/01/05`, which then surface as malformed
-    // dates). Looking for a dot ANYWHERE instead would hand `2025-09.01`
-    // and `2025+note.txt` to the version parser, which reads them as a
-    // pre-release and as build metadata respectively; both then parse
-    // cleanly, go unsatisfied, and disappear. A mistyped deadline has to
-    // stay loud, so the dot only counts while it's still in the core.
+    // For an unmarked span the byte right after the leading digits picks
+    // the form, the same byte `parse_bare_span` committed on: `.` routes to
+    // the version parser (`2.0`, `2026.01`, which then fail the marker
+    // check and are reported), anything else routes to the date parser
+    // (`2026-09`, and also `2026`, `2026+x`, `2026/01/05`, which surface as
+    // malformed dates). Looking for a dot ANYWHERE instead would send
+    // `2025-09.01` and `2025+note.txt` down the version path, where the
+    // dot lands in a pre-release or in build metadata; they would be
+    // reported as unmarked versions rather than as the malformed dates
+    // they are, which names the wrong remedy.
     let dotted_core = written
         .bytes()
         .position(|b| !b.is_ascii_digit())
@@ -692,8 +706,8 @@ mod tests {
     #[test]
     fn version_triggers_match_across_comment_styles() {
         let todo_by_tags = todo_by();
-        let ge = ">=2.0";
-        let gt_pre = ">1.4.0-rc.1";
+        let ge = ">=v2.0";
+        let gt_pre = ">v1.4.0-rc.1";
         let ge_v = ">=v3.0";
         let cases = [
             (
@@ -739,20 +753,19 @@ mod tests {
     }
 
     #[test]
-    fn bare_versions_imply_ge() {
+    fn marked_versions_without_a_comparator_imply_ge() {
         let todo_by_tags = todo_by();
         let today = Date::new(2999, 1, 1).unwrap();
         let c = ctx(today, None, &todo_by_tags);
         for written in [
-            "0.2",
-            "2026.01",
-            "1.2.3",
-            "2026.01-rc.1",
+            "v0.2",
+            "v1.2.3",
             "v2.0",
             "v2026.01",
-            // A `v` prefix stands in for the separator rule: this is the
-            // one way to write a bare one-component constraint, since
-            // `2026` alone is a retired year-only deadline.
+            "v2026.01-rc.1",
+            // The marker is also what makes a one-component constraint
+            // writable at all, since `2026` alone is a retired year-only
+            // deadline.
             "v2026",
         ] {
             let line = format!("// todo-by {written} drop legacy");
@@ -768,10 +781,49 @@ mod tests {
                     assert_eq!(
                         constraint,
                         &Constraint::parse(&format!(">={written}")).unwrap(),
-                        "bare {written:?} must mean >={written}"
+                        "{written:?} must mean >={written}"
                     );
                 }
                 _ => panic!("expected VersionPending for {line:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn unmarked_numbers_are_reported_never_guessed_at() {
+        // The rule that pays for itself: each of these reads as a version
+        // AND as something else (a dotted deadline, a day-first date, the
+        // start of a sentence), so none of them is guessed at. Reporting
+        // beats both wrong answers, because guessing "version" fails
+        // silently: an unsatisfied constraint produces no finding at all.
+        let todo_by_tags = todo_by();
+        let today = Date::new(2999, 1, 1).unwrap();
+        let c = ctx(today, None, &todo_by_tags);
+        for written in ["2.0", "2026.01", "2026.09.01", "12.5.2026", "3.5"] {
+            let line = format!("// todo-by {written} drop legacy");
+            let mut findings = Vec::new();
+            scan_text("f", &line, &c, &mut findings);
+            assert_eq!(findings.len(), 1, "{line:?}");
+            match &findings[0].kind {
+                Kind::InvalidTrigger { written: w } => assert_eq!(w, written, "{line:?}"),
+                _ => panic!("expected InvalidTrigger for {line:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn comparators_need_the_marker_too() {
+        let todo_by_tags = todo_by();
+        let today = Date::new(2999, 1, 1).unwrap();
+        let c = ctx(today, None, &todo_by_tags);
+        for written in [">=2.0", ">2.0", ">= 2.0"] {
+            let line = format!("// todo-by {written} drop legacy");
+            let mut findings = Vec::new();
+            scan_text("f", &line, &c, &mut findings);
+            assert_eq!(findings.len(), 1, "{line:?}");
+            match &findings[0].kind {
+                Kind::InvalidTrigger { written: w } => assert_eq!(w, written, "{line:?}"),
+                _ => panic!("expected InvalidTrigger for {line:?}"),
             }
         }
     }
@@ -900,7 +952,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dot_makes_it_a_version_a_dash_keeps_it_a_date() {
+    fn a_dash_keeps_it_a_date_and_a_marker_makes_it_a_version() {
         let todo_by_tags = todo_by();
         let today = Date::new(2999, 1, 1).unwrap();
         let c = ctx(today, None, &todo_by_tags);
@@ -910,9 +962,16 @@ mod tests {
         assert!(matches!(findings[0].kind, Kind::Overdue { .. }));
 
         let mut findings = Vec::new();
-        let dotted = "2998.01";
-        scan_text("f", &format!("// todo-by {dotted}"), &c, &mut findings);
+        let marked = "v2998.01";
+        scan_text("f", &format!("// todo-by {marked}"), &c, &mut findings);
         assert!(matches!(findings[0].kind, Kind::VersionPending { .. }));
+
+        // The same digits without either marking are what the rule exists
+        // to catch: reported, so the author picks one.
+        let mut findings = Vec::new();
+        let unmarked = "2998.01";
+        scan_text("f", &format!("// todo-by {unmarked}"), &c, &mut findings);
+        assert!(matches!(findings[0].kind, Kind::InvalidTrigger { .. }));
     }
 
     #[test]
@@ -921,7 +980,7 @@ mod tests {
         let today = Date::new(2999, 1, 1).unwrap();
         let c = ctx(today, None, &todo_by_tags);
 
-        for written in [">= 2.0", ">=  2.0", "> v2.0", ">= 2999"] {
+        for written in [">= v2.0", ">=  v2.0", "> v2.0", ">= v2999"] {
             let line = format!("// todo-by {written} drop it");
             let mut findings = Vec::new();
             scan_text("f", &line, &c, &mut findings);
@@ -1000,7 +1059,7 @@ mod tests {
         let todo_by_tags = todo_by();
         let today = Date::new(2999, 1, 1).unwrap();
         let warn_until = Date::new(2999, 1, 15).unwrap();
-        let written = ">=2.0";
+        let written = ">=v2.0";
         let line = format!("// todo-by {written} drop it");
 
         let mut findings = Vec::new();
@@ -1024,7 +1083,7 @@ mod tests {
         let todo_by_tags = todo_by();
         let today = Date::new(2999, 1, 1).unwrap();
         let c = ctx(today, None, &todo_by_tags);
-        let ge = ">=2.0";
+        let ge = ">=v2.0";
         let line = format!("// todo-by 2998-01-01 overdue, todo-by {ge} drop legacy");
         let mut findings = Vec::new();
         scan_text("f", &line, &c, &mut findings);
@@ -1041,7 +1100,7 @@ mod tests {
         let todo_by_tags = todo_by();
         let today = Date::new(2999, 1, 1).unwrap();
         let c = ctx(today, None, &todo_by_tags);
-        let ge = ">=999.0"; // "unsatisfied" once main.rs resolves it; the scanner just emits VersionPending
+        let ge = ">=v999.0"; // "unsatisfied" once main.rs resolves it; the scanner just emits VersionPending
         let line = format!("// todo-by {ge} not yet, todo-by 2998-01-01 also overdue");
         let mut findings = Vec::new();
         scan_text("f", &line, &c, &mut findings);
@@ -1098,11 +1157,11 @@ mod tests {
         let today = Date::new(2999, 1, 1).unwrap();
         let c = ctx(today, None, &todo_by_tags);
         let mut findings = Vec::new();
-        let ge = ">=2.0";
+        let ge = ">=v2.0";
         scan_text("f", &format!("<!-- todo-by {ge}-->"), &c, &mut findings);
         assert_eq!(findings.len(), 1);
         match &findings[0].kind {
-            Kind::VersionPending { written, .. } => assert_eq!(written, ">=2.0"),
+            Kind::VersionPending { written, .. } => assert_eq!(written, ">=v2.0"),
             _ => panic!("expected VersionPending, the closer must not corrupt the version span"),
         }
     }
