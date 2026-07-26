@@ -1,8 +1,12 @@
-# todo-by
+<p align="center">
+  <img src="https://raw.githubusercontent.com/alies-dev/todo-by/main/assets/banner.svg" alt="todo-by" width="620">
+</p>
 
-[![CI](https://github.com/alies-dev/todo-by/actions/workflows/ci.yml/badge.svg)](https://github.com/alies-dev/todo-by/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/todo-by-cli.svg)](https://crates.io/crates/todo-by-cli)
-[![license](https://img.shields.io/crates/l/todo-by-cli.svg)](LICENSE)
+<p align="center">
+  <a href="https://github.com/alies-dev/todo-by/actions/workflows/ci.yml"><img src="https://github.com/alies-dev/todo-by/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://crates.io/crates/todo-by-cli"><img src="https://img.shields.io/crates/v/todo-by-cli.svg" alt="crates.io"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/crates/l/todo-by-cli.svg" alt="license"></a>
+</p>
 
 Flag `todo-by` tags whose deadline has passed, or whose target version has shipped. Works on any file type. Tiny and lightning-fast. Respects your .gitignore.
 
