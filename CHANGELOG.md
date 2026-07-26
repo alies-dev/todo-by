@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-26
+
 ### Added
 
 - Version triggers: a tag can fire when the project reaches a version instead of on a date. Write the version with a lowercase `v` (`v2.0`, or `v2026.01` for calendar versions) to mean "that version or later", or with an explicit comparator (`>=v2.0`, `>v2.0`). `<`, `<=`, `=`, `==`, `^`, and `~` are recognized and reported as invalid rather than silently ignored, since this tool cannot fire on a version that is never released or one held below a ceiling.
@@ -56,7 +58,8 @@ Initial release.
 - Exit codes: 0 clean, 1 findings, 2 error.
 - `--today` to override the clock for testing and dry runs.
 
-[Unreleased]: https://github.com/alies-dev/todo-by/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/alies-dev/todo-by/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/alies-dev/todo-by/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/alies-dev/todo-by/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/alies-dev/todo-by/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/alies-dev/todo-by/releases/tag/v0.1.0
