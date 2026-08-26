@@ -23,8 +23,8 @@ use std::process::{Command, Stdio};
 const OVERDUE_TAG: &str = concat!("// todo-", "by 2000-01-01: expired long ago\n");
 
 /// The output a test needs before a closed reader can break anything.
-/// Twice the 64 KB a pipe buffer holds on Linux, which is the larger of
-/// the two platforms CI runs.
+/// Twice the 64 KB a pipe buffer holds on Linux, the largest buffer
+/// among the three platforms CI runs.
 const MIN_PIPE_FILLING_OUTPUT: usize = 128 * 1024;
 
 /// Builds a tree whose output cannot fit in a pipe buffer.

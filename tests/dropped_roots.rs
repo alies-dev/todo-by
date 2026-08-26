@@ -17,7 +17,16 @@ fn tree(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("todo-by-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(dir.join(".git/logs")).expect("temp dir");
-    fs::write(dir.join(".git/logs/HEAD"), "0000 1111 commit: message\n").expect("git log");
+    // Split so the dogfood CI step, which scans this repository with the
+    // binary under test, cannot mistake this line for a real overdue tag.
+    // In the fixture it is contiguous and overdue: a regression that
+    // walks `.git` after all would surface as a finding, not stay
+    // invisible behind an empty log.
+    fs::write(
+        dir.join(".git/logs/HEAD"),
+        concat!("0000 1111 commit: todo-", "by 2000-01-01 in metadata\n"),
+    )
+    .expect("git log");
     fs::write(dir.join("visible.rs"), "// nothing to find here\n").expect("source file");
     dir
 }
@@ -103,15 +112,24 @@ fn a_scan_that_kept_a_root_still_exits_on_what_it_found() {
 fn stdin_is_a_source_the_dropped_roots_cannot_take_away() {
     // `todo-by - .git` reads stdin and reports what it finds there, so
     // the scan ran. Failing it would break a pipeline for a path the
-    // tool was never going to read anyway.
+    // tool was never going to read anyway. The overdue tag on stdin
+    // (split for the dogfood run's sake) is what proves stdin was
+    // actually scanned: exit 0 alone could also mean it was never read.
     let dir = tree("stdin-kept");
     let git = dir.join(".git");
-    let out = todo_by_with_stdin(&[&git], &dir, "// nothing to find here\n");
+    let overdue = concat!("// todo-", "by 2000-01-01 expired on stdin\n");
+    let out = todo_by_with_stdin(&[&git], &dir, overdue);
+    let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     let _ = fs::remove_dir_all(&dir);
 
     assert!(stderr.contains("never scanned"), "stderr: {stderr}");
-    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert!(stdout.contains("<stdin>"), "stdout: {stdout}");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the stdin finding decides the exit code, not the dropped root: {stderr}"
+    );
 }
 
 #[test]
