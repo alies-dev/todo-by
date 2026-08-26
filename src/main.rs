@@ -4,7 +4,8 @@
 // them from coming back (CI runs it with `-D warnings`).
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
-use std::collections::HashSet;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::io::{self, IsTerminal, Write};
 use std::path::{Component, Path, PathBuf};
@@ -682,23 +683,41 @@ fn inside_vcs_dir(path: &Path) -> bool {
 /// left apart unless the two are identical as written, which is safe to
 /// collapse without resolving anything; nothing here ever excludes a
 /// root on evidence weaker than that.
+///
+/// Among duplicate spellings the first one is kept, with one exception:
+/// a spelling that [`walk_builder`] would refuse as version control
+/// metadata loses to the first spelling that would actually be walked.
+/// `todo-by .git/escape worktree`, where the first path is a symlink to
+/// the second, must scan `worktree` exactly like the reversed order
+/// does; collapsing it into the `.git/`-spelled entry would hand the
+/// whole group to the root filter and silently scan nothing.
 fn collapse_duplicate_roots(roots: &mut Vec<PathBuf>) {
-    let keys: Vec<Option<PathBuf>> = roots
-        .iter()
-        .map(|r| std::fs::canonicalize(r).ok())
-        .collect();
-    // Whether `i` is an earlier occurrence of the exact same root as `j`,
-    // either as written or once both are resolved.
-    let duplicate_of_earlier = |i: usize, j: usize| -> bool {
-        i < j
-            && (roots[i] == roots[j]
-                || matches!((&keys[i], &keys[j]), (Some(a), Some(b)) if a == b))
-    };
-    let keep: Vec<bool> = (0..roots.len())
-        .map(|j| !(0..roots.len()).any(|i| duplicate_of_earlier(i, j)))
-        .collect();
-    let mut keep = keep.into_iter();
-    roots.retain(|_| keep.next().unwrap());
+    // Keyed on the resolved path when there is one and on the spelling
+    // itself when there is not; `resolved` keeps the two namespaces from
+    // ever colliding.
+    let mut first_by_key: HashMap<(bool, PathBuf), usize> = HashMap::with_capacity(roots.len());
+    let mut kept: Vec<(PathBuf, bool)> = Vec::with_capacity(roots.len());
+    for root in roots.drain(..) {
+        let canonical = std::fs::canonicalize(&root).ok();
+        let dropped = names_vcs_dir(&root) || canonical.as_deref().is_some_and(names_vcs_dir);
+        let (resolved, key) = match canonical {
+            Some(canonical) => (true, canonical),
+            None => (false, root.clone()),
+        };
+        match first_by_key.entry((resolved, key)) {
+            Entry::Vacant(slot) => {
+                slot.insert(kept.len());
+                kept.push((root, dropped));
+            }
+            Entry::Occupied(slot) => {
+                let survivor = &mut kept[*slot.get()];
+                if survivor.1 && !dropped {
+                    *survivor = (root, dropped);
+                }
+            }
+        }
+    }
+    roots.extend(kept.into_iter().map(|(root, _)| root));
 }
 
 /// The roots `walk_builder` will drop, phrased for the user. Dropping
@@ -2275,6 +2294,34 @@ mod tests {
             vec![via_worktree],
             "whichever spelling was typed first should be the one kept"
         );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_metadata_spelling_never_wins_the_collapse() {
+        // `.git/escape` and `worktree` resolve to the same directory, so
+        // they collapse — but the kept spelling decides everything that
+        // follows: the `.git/`-spelled survivor would be refused by the
+        // root filter and the directory silently never scanned, with the
+        // verdict flipping on argument order.
+        let root = walk_fixture("vcs-spelled-duplicate");
+        let escape = root.join(".git").join("escape");
+        std::os::unix::fs::symlink("../worktree", &escape).unwrap();
+        let worktree = root.join("worktree");
+
+        let mut escape_first = vec![escape.clone(), worktree.clone()];
+        collapse_duplicate_roots(&mut escape_first);
+        assert_eq!(
+            escape_first,
+            vec![worktree.clone()],
+            "the walkable spelling must survive even from second place"
+        );
+
+        let mut worktree_first = vec![worktree.clone(), escape.clone()];
+        collapse_duplicate_roots(&mut worktree_first);
+        assert_eq!(worktree_first, vec![worktree]);
 
         std::fs::remove_dir_all(&root).ok();
     }

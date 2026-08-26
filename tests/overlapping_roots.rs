@@ -89,6 +89,42 @@ fn an_exact_duplicate_root_lists_each_file_once() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn a_metadata_spelling_of_a_real_root_does_not_hide_it() {
+    // `.git/escape` is a symlink to `src`, so the two arguments collapse
+    // to one root — and the kept spelling must be the one the walk will
+    // accept. Collapsing into the `.git/`-spelled survivor would hand
+    // `src` to the metadata filter and the overdue tag below would never
+    // be seen, flipping the exit code with the argument order.
+    //
+    // The tag is split so the dogfood CI step, which scans this very
+    // repository, cannot mistake this source line for a real overdue tag.
+    let dir = tree("vcs-spelled-alias");
+    fs::create_dir_all(dir.join(".git")).expect(".git dir");
+    std::os::unix::fs::symlink("../src", dir.join(".git/escape")).expect("symlink");
+    fs::write(
+        dir.join("src/old.rs"),
+        concat!("// todo-", "by 2000-01-01 long expired\n"),
+    )
+    .expect("overdue file");
+
+    let escape_first = todo_by(&[".git/escape", "src"], &dir);
+    let src_first = todo_by(&["src", ".git/escape"], &dir);
+    let _ = fs::remove_dir_all(&dir);
+
+    for (label, out) in [("escape first", &escape_first), ("src first", &src_first)] {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stdout.contains("old.rs"), "{label}: {stdout} {stderr}");
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{label}: the overdue finding must decide the exit code: {stderr}"
+        );
+    }
+}
+
 #[test]
 fn an_explicit_root_gitignored_by_its_parent_keeps_full_coverage() {
     // README: a path named on the command line is walked with root
