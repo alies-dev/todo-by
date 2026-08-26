@@ -1091,8 +1091,15 @@ fn main() -> ExitCode {
 
     if cli.files {
         // `--files` never reads stdin, so a `-` among the paths cannot
-        // stand in for the roots that were dropped.
+        // stand in for the roots that were dropped — and `--files -`
+        // alone leaves nothing to list at all, which must not look like
+        // a clean empty listing any more than an all-dropped root list
+        // may look like a clean scan.
         had_error = had_error || every_root_dropped(&fs_paths);
+        if has_stdin && fs_paths.is_empty() {
+            note!("--files lists walked files and never reads stdin; nothing to list");
+            had_error = true;
+        }
         let (paths, walk_error) = list_file_paths(&fs_paths, overrides);
         if let Err(code) = write_stdout(|w| {
             for p in &paths {

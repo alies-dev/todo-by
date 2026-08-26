@@ -115,6 +115,22 @@ fn stdin_is_a_source_the_dropped_roots_cannot_take_away() {
 }
 
 #[test]
+fn listing_files_with_only_stdin_has_nothing_to_list_and_says_so() {
+    // `todo-by --files -` names a source `--files` can never use, so the
+    // run lists nothing — which must not be mistakable for a clean empty
+    // listing, the same contract the dropped-roots cases pin.
+    let dir = tree("stdin-only-files");
+    let files = Path::new("--files");
+    let out = todo_by_with_stdin(&[files], &dir, "// nothing to find here\n");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(stderr.contains("never reads stdin"), "stderr: {stderr}");
+    assert!(out.stdout.is_empty(), "nothing was walked");
+    assert_eq!(out.status.code(), Some(2), "stderr: {stderr}");
+}
+
+#[test]
 fn listing_files_cannot_lean_on_stdin() {
     // `--files` lists walked paths and never reads stdin, so `-` leaves
     // it with nothing to list and nothing to say about it.
