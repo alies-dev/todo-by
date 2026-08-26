@@ -1,5 +1,10 @@
+// The whole point of `crate::stdout` is that it is the only way out. A
+// `println!` anywhere else reintroduces the panic it exists to remove, so
+// the compiler, not a reviewer, is what keeps them from coming back.
+#![deny(clippy::print_stdout)]
+
 use std::ffi::OsStr;
-use std::io::{IsTerminal, Read};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,6 +20,7 @@ mod issue;
 mod json;
 mod output;
 mod scanner;
+mod stdout;
 mod version;
 
 use date::Date;
@@ -185,13 +191,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
             ),
             "--files" => cli.files = true,
             "--dump-config" => cli.dump_config = true,
-            "-h" | "--help" => {
-                println!("{USAGE}");
-                std::process::exit(0);
-            }
+            "-h" | "--help" => print_and_exit(&format!("{USAGE}\n")),
             "-V" | "--version" => {
-                println!("todo-by {}", env!("CARGO_PKG_VERSION"));
-                std::process::exit(0);
+                print_and_exit(&format!("todo-by {}\n", env!("CARGO_PKG_VERSION")))
             }
             "-" => cli.paths.push(PathBuf::from("-")),
             _ if arg.starts_with('-') => return Err(format!("unknown option {arg:?}")),
@@ -732,6 +734,30 @@ fn list_file_paths(roots: &[PathBuf], overrides: Option<Override>) -> (Vec<Strin
     (paths, had_error)
 }
 
+/// Writes to stdout, turning the failures that are real failures into the
+/// exit code the contract gives them. `Ok(())` means the output either
+/// completed or was cut short by a reader that stopped reading; see
+/// `stdout::write` for why the second one is not an error.
+fn write_stdout(f: impl FnOnce(&mut dyn Write) -> io::Result<()>) -> Result<(), ExitCode> {
+    stdout::write(f).map_err(|err| {
+        eprintln!("todo-by: {err}");
+        ExitCode::from(2)
+    })
+}
+
+/// Prints `text` and ends the process, the way `--help` and `--version`
+/// do: nothing after them depends on the rest of parsing. Exits 2 if the
+/// text could not be written for a reason other than a closed reader,
+/// since a caller reading `--version` into a variable must not be handed
+/// an empty string and a success.
+fn print_and_exit(text: &str) -> ! {
+    let code = match write_stdout(|w| write!(w, "{text}")) {
+        Ok(()) => 0,
+        Err(_) => 2,
+    };
+    std::process::exit(code);
+}
+
 fn main() -> ExitCode {
     let cli = match parse_args(std::env::args().skip(1)) {
         Ok(cli) => cli,
@@ -806,7 +832,9 @@ fn main() -> ExitCode {
             online: Some(online),
             ..cfg
         };
-        print!("{}", config::dump(&effective));
+        if let Err(code) = write_stdout(|w| write!(w, "{}", config::dump(&effective))) {
+            return code;
+        }
         return ExitCode::SUCCESS;
     }
 
@@ -851,8 +879,13 @@ fn main() -> ExitCode {
 
     if cli.files {
         let (paths, walk_error) = list_file_paths(&fs_paths, overrides);
-        for p in &paths {
-            println!("{p}");
+        if let Err(code) = write_stdout(|w| {
+            for p in &paths {
+                writeln!(w, "{p}")?;
+            }
+            Ok(())
+        }) {
+            return code;
         }
         return if had_error || walk_error {
             ExitCode::from(2)
@@ -981,7 +1014,9 @@ fn main() -> ExitCode {
         today,
         current_version,
     };
-    output::render(&findings, &opts);
+    if let Err(code) = write_stdout(|w| output::render(w, &findings, &opts)) {
+        return code;
+    }
 
     if had_error {
         return ExitCode::from(2);
