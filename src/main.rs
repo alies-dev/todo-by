@@ -105,6 +105,21 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
                 .or_else(|| args.next())
                 .ok_or_else(|| format!("missing value for {name}"))
         };
+        // A flag that takes no value must refuse one rather than drop it:
+        // `--online=false` parses as the flag plus a discarded "false", so
+        // silently ignoring it does the exact opposite of what was written.
+        // Same for every other switch here.
+        const VALUELESS: [&str; 6] = [
+            "--online",
+            "--offline",
+            "--exit-zero",
+            "--hidden",
+            "--files",
+            "--dump-config",
+        ];
+        if inline_value.is_some() && VALUELESS.contains(&flag.as_str()) {
+            return Err(format!("{flag} takes no value"));
+        }
         match flag.as_str() {
             "--format" => {
                 cli.format = Some(match value("--format")?.as_str() {
@@ -1374,6 +1389,25 @@ mod tests {
             },
             message: "msg".to_string(),
         }
+    }
+
+    #[test]
+    fn a_valueless_flag_rejects_an_inline_value() {
+        for arg in [
+            "--online=false",
+            "--offline=true",
+            "--exit-zero=0",
+            "--hidden=no",
+            "--files=x",
+            "--dump-config=x",
+        ] {
+            let err = parse_args(args(&[arg])).expect_err("rejected");
+            assert!(err.contains("takes no value"), "{arg}: {err}");
+        }
+        // The bare forms still work.
+        let cli = parse_args(args(&["--online", "--exit-zero", "--hidden"])).expect("valid");
+        assert_eq!(cli.online, Some(true));
+        assert!(cli.exit_zero && cli.hidden);
     }
 
     #[test]

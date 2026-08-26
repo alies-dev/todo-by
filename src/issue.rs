@@ -639,6 +639,12 @@ fn send_curl(token: &str, url: &str, body: &str) -> Result<String, String> {
     }
     let path = stage_body(body)?;
     let mut cmd = Command::new("curl");
+    // `--silent --show-error` rather than `--no-progress-meter`, which curl
+    // only learned in 7.67 (2019): the older builds still shipping in
+    // long-term-support images would reject the flag and fail before the
+    // request. The pair suppresses the progress meter the same way and
+    // keeps error text on stderr, which the caller quotes.
+    //
     // No `--retry`: the response goes to stdout, which curl cannot truncate
     // the way it truncates an `-o` file, so a retried 502 would concatenate
     // two bodies and two status lines and the reader would call a request
@@ -646,7 +652,8 @@ fn send_curl(token: &str, url: &str, body: &str) -> Result<String, String> {
     cmd.args([
         "--config",
         "-",
-        "--no-progress-meter",
+        "--silent",
+        "--show-error",
         "--max-time",
         CURL_TIMEOUT,
     ]);

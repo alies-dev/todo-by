@@ -340,10 +340,13 @@ fn parse_issue_span(bytes: &[u8], start: usize) -> Option<usize> {
         // validator whole, but a trailing one is sentence punctuation, not
         // part of the reference: `#123. drop the shim` must resolve issue
         // 123, not report `#123.` as unusable. Same rule as the URL branch.
-        return Some(trim_trailing_html_comment_dashes(
-            bytes,
-            trim_trailing_sentence_punctuation(bytes, start, j),
-        ));
+        //
+        // The closer comes off FIRST. `trim_trailing_html_comment_dashes`
+        // only fires when the next byte is `>`, so trimming punctuation
+        // ahead of it would strand the `--` in `#123.-->` and report a
+        // perfectly good reference as unusable.
+        let j = trim_trailing_html_comment_dashes(bytes, j);
+        return Some(trim_trailing_sentence_punctuation(bytes, start, j));
     }
     if !(bytes[j..].starts_with(b"https://") || bytes[j..].starts_with(b"http://")) {
         return None;
@@ -357,8 +360,11 @@ fn parse_issue_span(bytes: &[u8], start: usize) -> Option<usize> {
     if bytes[start..j].ends_with(b"*/") {
         j -= 2;
     }
-    let j = trim_trailing_sentence_punctuation(bytes, start, j);
-    let end = trim_trailing_html_comment_dashes(bytes, j);
+    // Closer first, punctuation second: see the `#` branch above. Reversed,
+    // a URL written `.../issues/7.-->` keeps its `--`, fails to parse, and
+    // (since a URL is not a marker) vanishes with no finding at all.
+    let j = trim_trailing_html_comment_dashes(bytes, j);
+    let end = trim_trailing_sentence_punctuation(bytes, start, j);
     // Unlike `#`, a URL is not a marker: it carries no signal that its
     // author meant a trigger at all. Prose mentioning the tag next to a
     // link is common (this repository's own Homebrew formula documents
@@ -406,20 +412,24 @@ fn trim_trailing_html_comment_dashes(bytes: &[u8], end: usize) -> usize {
 
 fn clean_message(rest: &str) -> String {
     let mut msg = rest.trim_start();
-    // A trigger written flush against an HTML comment closer leaves that
-    // closer at the head of the message: the span parsers hand the two
-    // hyphens back (see `trim_trailing_html_comment_dashes`) rather than
-    // swallow them, so they arrive here. Strip the whole closer before the
-    // leading `-`/`:` strip below, which would otherwise leave a stray `->`.
-    if let Some(stripped) = msg.strip_prefix("-->") {
-        msg = stripped.trim_start();
-    }
-    // Punctuation joining the trigger to its message, dropped so the
-    // message reads as prose. `.` and `,` are in the set for the URL form:
-    // a URL span gives back the sentence punctuation that followed it
-    // (`.../issues/7. remove this`), which would otherwise open the message.
-    if let Some(stripped) = msg.strip_prefix(['-', ':', '.', ',']) {
-        msg = stripped.trim_start();
+    // An HTML comment closer and the punctuation joining a trigger to its
+    // message can arrive in either order, because the span parsers give
+    // both back: `#123.--> tail` leaves ".--> tail" here, while `#123--> t`
+    // leaves "--> t". So both are stripped until neither matches, rather
+    // than assuming one always comes first. Without the closer strip the
+    // message would open with a stray `->`; without the punctuation strip
+    // it would open with the period that ended the author's sentence.
+    loop {
+        let before = msg;
+        if let Some(stripped) = msg.strip_prefix("-->") {
+            msg = stripped.trim_start();
+        }
+        if let Some(stripped) = msg.strip_prefix(['-', ':', '.', ',']) {
+            msg = stripped.trim_start();
+        }
+        if msg == before {
+            break;
+        }
     }
     for closer in ["*/", "-->", "#}", "}}"] {
         if let Some(stripped) = msg.strip_suffix(closer) {
@@ -1420,6 +1430,24 @@ mod tests {
         assert_eq!(written, "https://github.com/o/r/issues/12#issuecomment-9");
         assert_eq!(message, "drop it");
         assert!(matches!(issue_kind(&line), Kind::IssuePending { .. }));
+    }
+
+    #[test]
+    fn punctuation_flush_against_a_comment_closer_still_resolves() {
+        // The closer has to come off before the sentence punctuation does,
+        // or the `--` stays in the span: the hash form then reports a good
+        // reference as unusable, and the URL form disappears entirely.
+        for (line, written) in [
+            (format!("<!-- {TAG} #123.--> tail"), "#123"),
+            (
+                format!("<!-- {TAG} https://github.com/o/r/issues/7.--> tail"),
+                "https://github.com/o/r/issues/7",
+            ),
+        ] {
+            let (got, message) = match_line(&line, &todo_by()).expect("matched");
+            assert_eq!(got, written, "{line}");
+            assert_eq!(message, "tail", "{line}");
+        }
     }
 
     #[test]
