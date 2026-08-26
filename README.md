@@ -188,10 +188,19 @@ A tag can also fire once a GitHub issue or pull request closes. Two spellings, o
 | `https://github.com/o/r/issues/123` | explicit repository, any host, the only cross repository form |
 | `https://github.com/o/r/pull/123` | the same, spelled as a pull request |
 | `https://github.com/o/r/issues/123#issuecomment-456` | a comment permalink; the fragment and any query are ignored |
-| `owner/repo#123` | not supported, since the URL already says it and can also name a host |
-| `GH-123`, `gh#123`, `#12x` | reported as errors, with `#123` named as the fix |
+| `owner/repo#123` | rejected, quoting the exact URL to write instead |
+| `repo#123`, `GH-123`, `#12x` | rejected, with the accepted spelling as the fix |
 
 **The `#` is required**, for the same reason the `v` is on a version: it is the marker that tells this trigger from a date, a version, and from prose. A `#` not followed by an alphanumeric (`todo-by # note`) is prose and is skipped.
+
+The spellings GitHub itself renders as issue links (`owner/repo#123`, `repo#123`, `GH-123`) are not accepted, but they are not ignored either. Each is reported with the spelling to use instead, and the cross repository form quotes the exact URL, since it already carries everything needed to build one:
+
+```console
+$ todo-by
+src/legacy.rs:8: cross-repo reference "staabm/phpstan-dba#452" is not supported (write "https://github.com/staabm/phpstan-dba/issues/452"): drop the shim
+```
+
+The marker is what draws the line. A token with no `#` and a digit behind it stays prose, and that matters because `tags` is configurable: a project matching on `todo` would otherwise have every `TODO: refactor later` in the tree reported. `todo-by` does not police undated TODOs.
 
 **Any state other than open fires, `merged` included.** The close reason (`completed`, `not planned`) is never requested and never inspected. A tag on an issue closed as "not planned" therefore reports, which is deliberate: the author reads the finding and decides, and one visible finding beats a chore buried by a tool second guessing a tracker.
 

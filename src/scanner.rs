@@ -349,7 +349,7 @@ fn parse_issue_span(bytes: &[u8], start: usize) -> Option<usize> {
         return Some(trim_trailing_sentence_punctuation(bytes, start, j));
     }
     if !(bytes[j..].starts_with(b"https://") || bytes[j..].starts_with(b"http://")) {
-        return None;
+        return unsupported_reference_span(bytes, start);
     }
     while bytes
         .get(j)
@@ -375,6 +375,34 @@ fn parse_issue_span(bytes: &[u8], start: usize) -> Option<usize> {
     // trigger was intended.
     let span = std::str::from_utf8(&bytes[start..end]).ok()?;
     crate::issue::Reference::parse(span).map(|_| end)
+}
+
+/// Returns the end of a reference written in a spelling this tool does not
+/// accept (`owner/repo#123`, `repo#123`, `GH-123`), or None when the token
+/// carries no issue marker at all.
+///
+/// These commit for the same reason a malformed date does: `#` with a digit
+/// behind it says the author meant a trigger, so the tag earns an error
+/// naming the accepted spelling instead of vanishing into prose. GitHub
+/// renders all three as issue links, so people type them.
+///
+/// The marker requirement is what keeps this from becoming a plain-TODO
+/// linter. Tags are configurable, so a project may match on `todo`, and
+/// committing on any unrecognized token would then report every `TODO:`
+/// comment in the tree.
+fn unsupported_reference_span(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut j = start;
+    while bytes.get(j).is_some_and(|&b| {
+        b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'/' | b'#')
+    }) {
+        j += 1;
+    }
+    let token = std::str::from_utf8(&bytes[start..j]).ok()?;
+    if !crate::issue::looks_like_reference(token) {
+        return None;
+    }
+    let j = trim_trailing_html_comment_dashes(bytes, j);
+    Some(trim_trailing_sentence_punctuation(bytes, start, j))
 }
 
 /// Gives back punctuation that ends a sentence rather than the trigger, so
@@ -507,7 +535,10 @@ fn classify(written: &str, ctx: &ScanCtx) -> Option<Kind> {
     // the date/version reasoning below: nothing in either of those forms
     // starts with `#` or a URL scheme. Resolving one needs the network, so
     // like a version constraint it becomes a pending candidate for main.rs.
-    if bytes[0] == b'#' || written.starts_with("http") {
+    if bytes[0] == b'#'
+        || written.starts_with("http")
+        || crate::issue::looks_like_reference(written)
+    {
         return Some(match crate::issue::Reference::parse(written) {
             Some(reference) => Kind::IssuePending {
                 written: written.to_string(),
@@ -1447,6 +1478,49 @@ mod tests {
             let (got, message) = match_line(&line, &todo_by()).expect("matched");
             assert_eq!(got, written, "{line}");
             assert_eq!(message, "tail", "{line}");
+        }
+    }
+
+    #[test]
+    fn github_own_spellings_are_reported_not_ignored() {
+        // GitHub renders all three as issue links, so people type them.
+        // Each earns an error naming the spelling this tool takes, the same
+        // way a malformed date or an unmarked version does.
+        for (trigger, expected) in [
+            (
+                "staabm/phpstan-dba#452",
+                "https://github.com/staabm/phpstan-dba/issues/452",
+            ),
+            ("repo#7", "\"#7\""),
+            ("GH-123", "\"#123\""),
+        ] {
+            let line = format!("// {TAG} {trigger} drop the shim");
+            let (written, message) = match_line(&line, &todo_by()).expect("matched");
+            assert_eq!(written, trigger, "{line}");
+            assert_eq!(message, "drop the shim", "{line}");
+            match issue_kind(&line) {
+                Kind::IssueError { detail, .. } => {
+                    assert!(detail.contains(expected), "{trigger}: {detail}")
+                }
+                _ => panic!("expected an error finding for {trigger}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_token_without_the_marker_is_still_prose() {
+        // The marker requirement is load-bearing: tags are configurable, so
+        // a project matching on `todo` must not have every plain TODO
+        // reported just because the token after it is unrecognized.
+        for trigger in [
+            "refactor",
+            "later",
+            "docs/readme.md#section",
+            "fix#abc",
+            "GH-x",
+        ] {
+            let line = format!("// {TAG} {trigger} some prose");
+            assert_eq!(match_line(&line, &todo_by()), None, "{line}");
         }
     }
 

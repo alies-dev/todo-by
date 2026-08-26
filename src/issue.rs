@@ -178,15 +178,66 @@ fn parse_number(s: &str) -> Option<u32> {
     }
 }
 
-/// Why a `#`-shaped span isn't a usable reference. Only the `#` form
-/// reaches this: `#` is a marker, so a tag carrying one meant a reference
-/// and earns an error naming the spelling. A URL is not a marker, so the
-/// scanner leaves an unrecognized one as prose instead of reporting it.
+/// Whether a token carries the issue marker: a `#` immediately followed by
+/// a digit, or the `GH-123` spelling GitHub also renders as a link.
+///
+/// This is deliberately narrow. The tag itself is configurable, so someone
+/// will set `tags = ["todo"]`, and a rule like "report any unrecognized
+/// token after the tag" would then report every `TODO: refactor later` in
+/// the tree. That is plain-TODO policing, which this tool does not do. A
+/// `#` with a digit behind it, on the other hand, is as deliberate as a
+/// date's dashes or a version's `v`.
+pub fn looks_like_reference(written: &str) -> bool {
+    let bytes = written.as_bytes();
+    bytes
+        .windows(2)
+        .any(|w| w[0] == b'#' && w[1].is_ascii_digit())
+        || (bytes.len() > 3 && bytes[..3].eq_ignore_ascii_case(b"gh-") && bytes[3].is_ascii_digit())
+}
+
+/// Why a marked span isn't a usable reference, with the accepted spelling
+/// named. A URL never reaches this: it carries no marker, so an
+/// unrecognized one stays prose rather than becoming a finding.
 pub fn syntax_help(written: &str) -> String {
+    if let Some(help) = unsupported_spelling(written) {
+        return help;
+    }
     if written.starts_with('#') {
         format!("invalid issue reference {written:?} (write #123, or the full issue URL)")
     } else {
         format!("invalid issue URL {written:?} (write https://github.com/owner/repo/issues/123)")
+    }
+}
+
+/// The spellings GitHub itself renders as issue links, which this tool
+/// does not accept. They are reported rather than ignored for the same
+/// reason an unmarked `2.0` is: a tag written this way meant a trigger, and
+/// silence would bury the chore instead of surfacing it.
+///
+/// `owner/repo#123` carries everything needed to name the replacement
+/// exactly, so the message quotes the URL to paste rather than describing
+/// the rule.
+fn unsupported_spelling(written: &str) -> Option<String> {
+    let bytes = written.as_bytes();
+    if bytes.len() > 3 && bytes[..3].eq_ignore_ascii_case(b"gh-") {
+        let number = parse_number(&written[3..])?;
+        return Some(format!(
+            "issue reference {written:?} is not supported (write \"#{number}\", \
+             or the full issue URL)"
+        ));
+    }
+    let (before, number) = written.rsplit_once('#')?;
+    let number = parse_number(number)?;
+    match before.split_once('/') {
+        Some((owner, name)) if valid_owner(owner) && valid_name(name) => Some(format!(
+            "cross-repo reference {written:?} is not supported \
+             (write \"https://github.com/{owner}/{name}/issues/{number}\")"
+        )),
+        None if valid_name(before) => Some(format!(
+            "repository-qualified reference {written:?} is not supported \
+             (write \"#{number}\" for this repository, or the full issue URL)"
+        )),
+        _ => None,
     }
 }
 
@@ -1213,6 +1264,44 @@ mod tests {
     fn syntax_help_names_the_right_spelling() {
         assert!(syntax_help("#12x").contains("#123"));
         assert!(syntax_help("https://github.com/o/r").contains("issues/123"));
+    }
+
+    #[test]
+    fn the_marker_is_a_hash_with_a_digit_or_the_gh_form() {
+        for marked in ["#1", "owner/repo#452", "repo#7", "GH-123", "gh-9"] {
+            assert!(looks_like_reference(marked), "{marked}");
+        }
+        for prose in [
+            "#abc",
+            "readme.md#section",
+            "GH-x",
+            "gh",
+            "2026-09-01",
+            ">=v2.0",
+        ] {
+            assert!(!looks_like_reference(prose), "{prose}");
+        }
+    }
+
+    #[test]
+    fn a_cross_repo_spelling_is_answered_with_the_exact_url() {
+        let help = syntax_help("staabm/phpstan-dba#452");
+        assert!(
+            help.contains("https://github.com/staabm/phpstan-dba/issues/452"),
+            "{help}"
+        );
+        assert!(
+            syntax_help("repo#7").contains("\"#7\""),
+            "names the bare form"
+        );
+        assert!(
+            syntax_help("GH-123").contains("\"#123\""),
+            "names the bare form"
+        );
+        // A `#` with no usable number is not one of these spellings, so it
+        // falls through to the generic message.
+        assert_eq!(unsupported_spelling("#12x"), None);
+        assert_eq!(unsupported_spelling("a b#1"), None);
     }
 
     #[test]
