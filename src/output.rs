@@ -49,9 +49,11 @@ pub fn render(w: &mut dyn Write, findings: &[Finding], opts: &RenderOpts) -> io:
                 // stdout would otherwise put the summary above the
                 // findings it counts.
                 w.flush()?;
-                // Best effort: `2>&1 | head` closes stderr the same way it
-                // closes stdout, and a dropped summary line is a better
-                // outcome than a panic on the way out.
+                // Best effort, for the reason `note!` is: `2>&1 | head`
+                // closes stderr the same way it closes stdout, and a
+                // dropped summary line beats a panic on the way out. It
+                // does not go through `note!` because it is a count, not
+                // a diagnostic, and carries no `todo-by: ` prefix.
                 let _ = writeln!(io::stderr(), "{}", summary_text(findings));
             }
         }

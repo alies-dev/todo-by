@@ -210,9 +210,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
             ),
             "--files" => cli.files = true,
             "--dump-config" => cli.dump_config = true,
-            "-h" | "--help" => print_and_exit(&format!("{USAGE}\n")),
+            "-h" | "--help" => print_and_exit(|w| writeln!(w, "{USAGE}")),
             "-V" | "--version" => {
-                print_and_exit(&format!("todo-by {}\n", env!("CARGO_PKG_VERSION")))
+                print_and_exit(|w| writeln!(w, "todo-by {}", env!("CARGO_PKG_VERSION")))
             }
             "-" => cli.paths.push(PathBuf::from("-")),
             _ if arg.starts_with('-') => return Err(format!("unknown option {arg:?}")),
@@ -764,13 +764,13 @@ fn write_stdout(f: impl FnOnce(&mut dyn Write) -> io::Result<()>) -> Result<(), 
     })
 }
 
-/// Prints `text` and ends the process, the way `--help` and `--version`
-/// do: nothing after them depends on the rest of parsing. Exits 2 if the
-/// text could not be written for a reason other than a closed reader,
-/// since a caller reading `--version` into a variable must not be handed
-/// an empty string and a success.
-fn print_and_exit(text: &str) -> ! {
-    let code = match write_stdout(|w| write!(w, "{text}")) {
+/// Writes `f`'s output and ends the process, the way `--help` and
+/// `--version` do: nothing after them depends on the rest of parsing.
+/// Exits 2 when the text could not be written for a reason other than a
+/// closed reader, since a script reading `--version` into a variable must
+/// not be handed an empty string and a success.
+fn print_and_exit(f: impl FnOnce(&mut dyn Write) -> io::Result<()>) -> ! {
+    let code = match write_stdout(f) {
         Ok(()) => 0,
         Err(_) => 2,
     };
