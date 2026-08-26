@@ -58,7 +58,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
         with:
           # Keep in sync with rust-version in Cargo.toml and clippy.toml
-          toolchain: "1.85"
+          toolchain: "1.88"
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo check --locked
 

@@ -2,9 +2,10 @@
 name = "todo-by-cli"
 version = "0.3.0"
 edition = "2021"
-# Floor set by lockfile-v4 deps that need edition2024 (stabilized in 1.85);
-# enforced by the msrv job in CI. Keep in sync with ci.yml and clippy.toml.
-rust-version = "1.85"
+# Floor set by the `ignore` dependency, which declares rust-version 1.88 from
+# 0.4.31 on; enforced by the msrv job in CI. Keep in sync with ci.yml and
+# clippy.toml.
+rust-version = "1.88"
 description = "Flag todo-by tags whose deadline has passed or whose target version has shipped, across any file type"
 license = "MIT"
 repository = "https://github.com/alies-dev/todo-by"

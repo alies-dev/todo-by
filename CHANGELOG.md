@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Minimum supported Rust version raised from 1.85 to 1.88. The `ignore` dependency declares `rust-version = "1.88"` from 0.4.31 on, so 1.85 no longer resolves a working dependency set.
+
 ## [0.3.0] - 2026-07-26
 
 ### Added
