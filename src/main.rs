@@ -4,7 +4,8 @@
 // them from coming back (CI runs it with `-D warnings`).
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
-use std::ffi::OsStr;
+use std::collections::HashSet;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, IsTerminal, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
@@ -666,6 +667,40 @@ fn inside_vcs_dir(path: &Path) -> bool {
         || std::fs::canonicalize(path).is_ok_and(|resolved| names_vcs_dir(&resolved))
 }
 
+/// Collapses an exact repeat of another root in the same list down to
+/// the first spelling, so a root typed twice is not walked twice. A root
+/// that merely nests inside another is left alone: it keeps its own
+/// entry in `roots`, since naming a path on the command line gives it
+/// root semantics (README: ignore rules do not apply to it), and a root
+/// dropped here would silently lose that for anything gitignored. Nested
+/// overlap is instead resolved inside the walk itself, in
+/// [`walk_builder`], which is the only place that can tell a covered
+/// path from one that must still be read in full.
+///
+/// Both sides are canonicalized so `src` and `./src` are recognised as
+/// the same place. When canonicalizing either side fails, the pair is
+/// left apart unless the two are identical as written, which is safe to
+/// collapse without resolving anything; nothing here ever excludes a
+/// root on evidence weaker than that.
+fn collapse_duplicate_roots(roots: &mut Vec<PathBuf>) {
+    let keys: Vec<Option<PathBuf>> = roots
+        .iter()
+        .map(|r| std::fs::canonicalize(r).ok())
+        .collect();
+    // Whether `i` is an earlier occurrence of the exact same root as `j`,
+    // either as written or once both are resolved.
+    let duplicate_of_earlier = |i: usize, j: usize| -> bool {
+        i < j
+            && (roots[i] == roots[j]
+                || matches!((&keys[i], &keys[j]), (Some(a), Some(b)) if a == b))
+    };
+    let keep: Vec<bool> = (0..roots.len())
+        .map(|j| !(0..roots.len()).any(|i| duplicate_of_earlier(i, j)))
+        .collect();
+    let mut keep = keep.into_iter();
+    roots.retain(|_| keep.next().unwrap());
+}
+
 /// The roots `walk_builder` will drop, phrased for the user. Dropping
 /// them quietly would make `todo-by .git/hooks` exit 0 with no output,
 /// which is what a clean scan looks like, and the neighbouring check
@@ -719,6 +754,63 @@ fn nothing_left_to_read(roots: &[PathBuf], has_stdin: bool) -> bool {
     !has_stdin && every_root_dropped(roots)
 }
 
+/// The other roots a walk from one root must never re-descend into, so
+/// two overlapping roots in the same [`WalkBuilder`] cover their shared
+/// files once each rather than once per covering root.
+///
+/// Each excluded root still gets walked in full: it is its own separate
+/// root elsewhere in the same builder, and its own depth-0 encounter of
+/// itself never reaches `filter_entry` (`ignore` calls that only from
+/// depth 1 down, the same reason the VCS check above needs a separate
+/// root-level pass). Suppressing the *second* visit here is what keeps
+/// that root's own walk, with its own root semantics, the only one that
+/// covers it — which is what lets a gitignored directory named directly
+/// alongside an ancestor still be scanned in full.
+struct RootBoundaries {
+    /// Every resolved root's final path component, checked first because
+    /// it is almost always a "no": canonicalizing every entry the walk
+    /// visits on the chance it is one of the other roots would be far
+    /// too much work for a check that rarely matches.
+    ///
+    /// Built from the canonicalized keys, not from the roots as typed:
+    /// a root's own spelling can name something other than what this
+    /// walk will meet again on the way down. `sub/..` has no final
+    /// component at all (`Path::file_name` is `None` for a path ending
+    /// in `.` or `..`), an on-disk case-insensitive match can differ
+    /// from the case it was typed in, and a root reached through a
+    /// symlink resolves to its target's name, not the link's. The
+    /// canonical key's last component is the one name guaranteed to
+    /// match the real directory entry another root's walk will find.
+    names: HashSet<OsString>,
+    /// Canonicalized keys, consulted only once a name matches. A root
+    /// that fails to canonicalize contributes to neither set; the walk
+    /// that reaches it directly still covers it, just without this
+    /// shortcut protecting it from a second visit.
+    keys: Vec<PathBuf>,
+}
+
+impl RootBoundaries {
+    fn new(roots: &[&PathBuf]) -> Self {
+        let keys: Vec<PathBuf> = roots
+            .iter()
+            .filter_map(|r| std::fs::canonicalize(r).ok())
+            .collect();
+        let names = keys
+            .iter()
+            .filter_map(|k| k.file_name().map(OsStr::to_os_string))
+            .collect();
+        Self { names, keys }
+    }
+
+    /// Whether `entry` names one of the boundary roots and so must not
+    /// be descended into (or yielded) from a different root's walk.
+    fn contains(&self, entry: &ignore::DirEntry) -> bool {
+        self.names.contains(entry.file_name())
+            && std::fs::canonicalize(entry.path())
+                .is_ok_and(|resolved| self.keys.contains(&resolved))
+    }
+}
+
 /// The walker configuration both scanning modes share, so `--files` and
 /// the scan can never walk a different tree. The sets they report still
 /// differ by the binary files the scan drops after the walk yields them.
@@ -734,15 +826,17 @@ fn nothing_left_to_read(roots: &[PathBuf], has_stdin: bool) -> bool {
 /// Returns `None` when no root survives, since a walker needs at least one
 /// path to start from; the callers report an empty result instead.
 fn walk_builder(roots: &[PathBuf], overrides: Option<Override>) -> Option<WalkBuilder> {
-    let mut kept = roots.iter().filter(|root| !inside_vcs_dir(root));
-    let mut builder = WalkBuilder::new(kept.next()?);
-    for root in kept {
+    let kept: Vec<&PathBuf> = roots.iter().filter(|root| !inside_vcs_dir(root)).collect();
+    let mut iter = kept.iter();
+    let mut builder = WalkBuilder::new(iter.next()?);
+    for root in iter {
         builder.add(root);
     }
+    let boundaries = RootBoundaries::new(&kept);
     builder
         .hidden(false)
         .require_git(false)
-        .filter_entry(|entry| !is_vcs_dir(entry.file_name()));
+        .filter_entry(move |entry| !is_vcs_dir(entry.file_name()) && !boundaries.contains(entry));
     if let Some(ov) = overrides {
         builder.overrides(ov);
     }
@@ -971,6 +1065,7 @@ fn main() -> ExitCode {
             had_error = true;
         }
     }
+    collapse_duplicate_roots(&mut fs_paths);
     for notice in skipped_root_notices(&fs_paths) {
         note!("{notice}");
     }
@@ -2019,6 +2114,192 @@ mod tests {
             [".github/workflows/ci.yml", "worktree/kept.txt"]
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_root_nested_inside_another_is_kept_and_walked_once() {
+        // v2 contract: a path named on the command line keeps root
+        // semantics (README: ignore rules do not apply to it), so
+        // nesting alone must not remove it — only an exact repeat does.
+        // Both roots survive `collapse_duplicate_roots`; it is the walk
+        // itself that must still cover the nested root's files exactly
+        // once, through its own root, whichever order the two were
+        // typed.
+        let root = walk_fixture("nested-roots");
+        let nested = root.join("worktree");
+
+        let mut ancestor_first = vec![root.clone(), nested.clone()];
+        collapse_duplicate_roots(&mut ancestor_first);
+        assert_eq!(
+            ancestor_first,
+            vec![root.clone(), nested.clone()],
+            "nesting is not a duplicate; both roots survive"
+        );
+
+        let mut descendant_first = vec![nested.clone(), root.clone()];
+        collapse_duplicate_roots(&mut descendant_first);
+        assert_eq!(descendant_first, vec![nested, root.clone()]);
+
+        // What that was for: the fixture's files come back once each,
+        // through both `--files` and the scan, in either order.
+        let listed = walked(&ancestor_first, &root, None);
+        assert_eq!(listed, WALK_FIXTURE_FILES);
+        assert_eq!(
+            walked(&descendant_first, &root, None),
+            listed,
+            "argument order must not change the result"
+        );
+        let expected: Vec<String> = listed
+            .into_iter()
+            .filter(|p| p != WALK_FIXTURE_BINARY)
+            .collect();
+        assert_eq!(scanned(&ancestor_first, &root, None), expected);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A root with a subdirectory its own `.gitignore` hides, so naming
+    /// that subdirectory directly can be checked against the ancestor's
+    /// walk: the ancestor must not re-cover it, and it must not lose the
+    /// root semantics that make it visible over its own ignore rule.
+    fn nested_root_fixture(tag: &str) -> PathBuf {
+        let root = unique_temp_dir(tag);
+        let write = |rel: &str, body: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        write("visible.rs", "// todo-by 2998-01-01 ordinary file\n");
+        write(".gitignore", "generated/\n");
+        write(
+            "generated/output.rs",
+            "// todo-by 2998-01-01 build artifact\n",
+        );
+        root
+    }
+
+    #[test]
+    fn a_gitignored_nested_root_keeps_full_coverage_through_its_own_root() {
+        let root = nested_root_fixture("nested-gitignore");
+        let generated = root.join("generated");
+
+        let listed = walked(&[root.clone(), generated.clone()], &root, None);
+        assert_eq!(
+            listed
+                .iter()
+                .filter(|p| *p == "generated/output.rs")
+                .count(),
+            1,
+            "an explicit root must not lose coverage to an ancestor's \
+             .gitignore, and must not be covered twice either: {listed:?}"
+        );
+
+        assert_eq!(
+            walked(&[generated, root.clone()], &root, None),
+            listed,
+            "argument order must not change the result"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_root_ending_in_dotdot_is_still_recognised_as_a_boundary() {
+        // `Path::file_name` is `None` for a path ending in `..` (a
+        // trailing `.` is elided by Rust's own path parsing instead, so
+        // it does not trigger this — only `..` survives as a component
+        // Rust cannot simplify away). A boundary built from the roots'
+        // own written names would silently drop a root spelled this way
+        // and cover `worktree` twice: once through the ancestor's
+        // ordinary recursion into the real directory, once through this
+        // root's own separate walk. `todo-by .. .` from inside a
+        // subdirectory is the same shape: the parent, and the
+        // subdirectory spelled through a roundabout path.
+        let root = walk_fixture("dotdot-boundary");
+        let nested = root.join("worktree");
+        std::fs::create_dir_all(nested.join("sub")).unwrap();
+        let via_dotdot = nested.join("sub").join("..");
+        assert_eq!(
+            via_dotdot.file_name(),
+            None,
+            "the fixture must exercise the missing file_name case"
+        );
+
+        // `via_dotdot` is the deepest root covering `worktree`, so its
+        // (roundabout) spelling is what survives in the output, same as
+        // any other nested root's own spelling would — the fixed
+        // `WALK_FIXTURE_FILES` list does not apply here. What matters is
+        // that `worktree`'s one file shows up once, not twice, and that
+        // the rest of the fixture is untouched.
+        let listed = walked(&[root.clone(), via_dotdot.clone()], &root, None);
+        assert_eq!(
+            listed.len(),
+            WALK_FIXTURE_FILES.len(),
+            "worktree's file must not be covered twice: {listed:?}"
+        );
+        assert_eq!(
+            listed.iter().filter(|p| p.ends_with("kept.txt")).count(),
+            1,
+            "worktree's file must not be covered twice: {listed:?}"
+        );
+        assert_eq!(
+            walked(&[via_dotdot, root.clone()], &root, None),
+            listed,
+            "argument order must not change the result"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_path_only_canonicalizing_proves_equal_collapses_to_the_first() {
+        let root = walk_fixture("same-root-twice");
+        // `worktree/..` is not `PathBuf`-equal to `root` — Rust never
+        // simplifies `..` lexically — so this only collapses if the
+        // comparison canonicalizes both sides, as it must to catch `src`
+        // and a roundabout path to the very same place.
+        let via_worktree = root.join("worktree").join("..");
+        assert_ne!(
+            root, via_worktree,
+            "the two spellings must differ as written"
+        );
+
+        let mut root_first = vec![root.clone(), via_worktree.clone()];
+        collapse_duplicate_roots(&mut root_first);
+        assert_eq!(root_first, vec![root.clone()]);
+
+        let mut via_worktree_first = vec![via_worktree.clone(), root.clone()];
+        collapse_duplicate_roots(&mut via_worktree_first);
+        assert_eq!(
+            via_worktree_first,
+            vec![via_worktree],
+            "whichever spelling was typed first should be the one kept"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn roots_that_cannot_be_resolved_are_kept_unless_identical_as_written() {
+        // Neither of these exists, so canonicalizing both fails. Without
+        // a resolved key to compare, a shared identity can't be proven,
+        // so the safe default is to keep both — except when the two are
+        // the same path spelled the same way, which needs no resolving
+        // to know is redundant.
+        let a = PathBuf::from("/nonexistent-todo-by-test-root-a");
+        let b = PathBuf::from("/nonexistent-todo-by-test-root-b");
+
+        let mut distinct = vec![a.clone(), b.clone()];
+        collapse_duplicate_roots(&mut distinct);
+        assert_eq!(
+            distinct,
+            vec![a.clone(), b],
+            "unresolvable roots must not be guessed away"
+        );
+
+        let mut duplicated = vec![a.clone(), a.clone()];
+        collapse_duplicate_roots(&mut duplicated);
+        assert_eq!(duplicated, vec![a]);
     }
 
     #[test]
