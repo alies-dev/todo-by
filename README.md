@@ -200,7 +200,7 @@ $ todo-by
 src/legacy.rs:8: cross-repo reference "staabm/phpstan-dba#452" is not supported (write "https://github.com/staabm/phpstan-dba/issues/452"): drop the shim
 ```
 
-The marker is what draws the line. A token with no `#` and a digit behind it stays prose, and that matters because `tags` is configurable: a project matching on `todo` would otherwise have every `TODO: refactor later` in the tree reported. `todo-by` does not police undated TODOs.
+Two spellings carry the marker: a `#` with a digit behind it, and the `GH-` form. A token carrying neither stays prose, and that matters because `tags` is configurable: a project matching on `todo` would otherwise have every `TODO: refactor later` in the tree reported. `todo-by` does not police undated TODOs.
 
 **Any state other than open fires, `merged` included.** The close reason (`completed`, `not planned`) is never requested and never inspected. A tag on an issue closed as "not planned" therefore reports, which is deliberate: the author reads the finding and decides, and one visible finding beats a chore buried by a tool second guessing a tracker.
 

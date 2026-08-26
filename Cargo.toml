@@ -6,7 +6,7 @@ edition = "2021"
 # 0.4.31 on; enforced by the msrv job in CI. Keep in sync with ci.yml and
 # clippy.toml.
 rust-version = "1.88"
-description = "Flag todo-by tags whose deadline has passed, whose target version has shipped, or whose GitHub issue has closed, across any file type"
+description = "Flag todo-by tags whose deadline has passed, whose target version has shipped, or whose GitHub issue or pull request has closed, across any file type"
 license = "MIT"
 repository = "https://github.com/alies-dev/todo-by"
 readme = "README.md"
