@@ -531,30 +531,37 @@ fn read_if_text<R: Read>(source: &mut R) -> std::io::Result<Option<Vec<u8>>> {
     Ok(Some(content))
 }
 
-/// Reads `path` and scans it, never reading a binary file past the bytes
-/// that classify it.
+/// Reads `source` and scans it, never reading binary content past the
+/// bytes that classify it.
 ///
-/// Peak memory tracks the largest text file rather than the largest file,
-/// and that distinction is the whole point: the walker runs one of these
-/// per worker, and a tool cache full of multi-gigabyte binaries is exactly
-/// the tree where the old read-then-decide order cost the most.
-pub fn scan_file(path: &Path, ctx: &ScanCtx, findings: &mut Vec<Finding>) -> std::io::Result<()> {
-    let mut file = File::open(path)?;
-    if let Some(content) = read_if_text(&mut file)? {
-        scan_lossy(&path.display().to_string(), &content, ctx, findings);
+/// Peak memory tracks the largest text source rather than the largest
+/// one, and that distinction is the whole point: the walker runs one of
+/// these per worker, and a tool cache full of multi-gigabyte binaries is
+/// exactly the tree where the old read-then-decide order cost the most.
+/// Piped input goes through here too, so `cat big.bin | todo-by -` costs
+/// the prefix rather than the file.
+pub fn scan_reader<R: Read>(
+    file_label: &str,
+    source: &mut R,
+    ctx: &ScanCtx,
+    findings: &mut Vec<Finding>,
+) -> std::io::Result<()> {
+    if let Some(content) = read_if_text(source)? {
+        scan_lossy(file_label, &content, ctx, findings);
     }
     Ok(())
 }
 
-/// Scans raw bytes already held in memory (stdin): skips binary content and
-/// decodes the rest lossily. [`scan_file`] deliberately does not route
-/// through here, since arriving with the bytes in hand is the cost it
-/// exists to avoid; it applies [`is_binary`] itself, to the prefix alone.
-pub fn scan_bytes(file_label: &str, content: &[u8], ctx: &ScanCtx, findings: &mut Vec<Finding>) {
-    if is_binary(content) {
-        return;
-    }
-    scan_lossy(file_label, content, ctx, findings);
+/// Opens `path` and scans it. One line, but the one the walker calls, and
+/// keeping it here is what makes "a file and the identical bytes on
+/// stdin behave alike" a fact about the code rather than a convention.
+pub fn scan_file(path: &Path, ctx: &ScanCtx, findings: &mut Vec<Finding>) -> std::io::Result<()> {
+    scan_reader(
+        &path.display().to_string(),
+        &mut File::open(path)?,
+        ctx,
+        findings,
+    )
 }
 
 /// Decodes lossily, so invalid UTF-8 never aborts a scan, and scans.
@@ -918,36 +925,34 @@ mod tests {
     }
 
     #[test]
-    fn scan_bytes_skips_binary_and_decodes_invalid_utf8_lossily() {
+    fn scan_reader_skips_binary_and_decodes_invalid_utf8_lossily() {
         let todo_by_tags = todo_by();
         let today = Date::new(2999, 1, 1).unwrap();
         let c = ctx(today, None, &todo_by_tags);
+        let scan = |label: &str, bytes: &[u8]| {
+            let mut findings = Vec::new();
+            scan_reader(label, &mut &bytes[..], &c, &mut findings).expect("scan bytes");
+            findings
+        };
 
         // NUL in the first 8 KiB: treated as binary, no findings.
-        let mut findings = Vec::new();
-        let binary = b"\x00// todo-by 2998-01-01 hidden in binary";
-        scan_bytes("bin", binary, &c, &mut findings);
-        assert!(findings.is_empty());
+        assert!(scan("bin", b"\x00// todo-by 2998-01-01 hidden in binary").is_empty());
 
         // A NUL past the window is content, not a verdict: the window is a
         // fixed 8 KiB, never "anywhere in the bytes". The NUL sits on the
-        // first byte outside it, and stdin is where this has to be pinned,
-        // being the one caller that hands over more than the window at
-        // once. `scan_file` cannot: it only ever holds the prefix when it
-        // decides.
-        let mut findings = Vec::new();
+        // first byte outside it, which is only reachable at all because
+        // the prefix came back full and a second read went looking.
         let mut content = b"// todo-by 2998-01-01 before a distant NUL\n".to_vec();
         content.resize(BINARY_PREFIX, b'x');
         content.push(0);
-        scan_bytes("late-nul", &content, &c, &mut findings);
+        let findings = scan("late-nul", &content);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].line, 1);
 
         // Invalid UTF-8 elsewhere must not abort the scan of a valid tag.
-        let mut findings = Vec::new();
         let mut content = b"\xff\xfe garbage\n".to_vec();
         content.extend_from_slice(b"// todo-by 2998-01-01 still found\n");
-        scan_bytes("mixed", &content, &c, &mut findings);
+        let findings = scan("mixed", &content);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].line, 2);
     }

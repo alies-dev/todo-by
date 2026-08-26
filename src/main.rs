@@ -940,22 +940,19 @@ fn main() -> ExitCode {
     had_error = had_error || walk_error;
 
     if has_stdin {
-        // Raw bytes, not read_to_string: invalid UTF-8 on stdin must scan
-        // lossily like file contents do, not abort with an I/O error.
-        let mut input = Vec::new();
-        match Read::read_to_end(&mut std::io::stdin(), &mut input) {
-            Ok(_) => {
-                let ctx = ScanCtx {
-                    today,
-                    warn_until,
-                    tags: &cfg.tags,
-                };
-                scanner::scan_bytes("<stdin>", &input, &ctx, &mut findings);
-            }
-            Err(err) => {
-                note!("<stdin>: {err}");
-                had_error = true;
-            }
+        // The same reader a file gets, for both reasons that matters:
+        // invalid UTF-8 scans lossily rather than aborting with an I/O
+        // error, and `cat big.bin | todo-by -` is classified from its
+        // prefix instead of being held whole first.
+        let ctx = ScanCtx {
+            today,
+            warn_until,
+            tags: &cfg.tags,
+        };
+        let stdin = std::io::stdin();
+        if let Err(err) = scanner::scan_reader("<stdin>", &mut stdin.lock(), &ctx, &mut findings) {
+            note!("<stdin>: {err}");
+            had_error = true;
         }
     }
 
