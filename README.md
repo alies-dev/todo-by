@@ -8,7 +8,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/crates/l/todo-by-cli.svg" alt="license"></a>
 </p>
 
-Flag `todo-by` tags whose deadline has passed, or whose target version has shipped. Works on any file type. Tiny and lightning-fast. Respects your .gitignore.
+Flag `todo-by` tags whose deadline has passed, whose target version has shipped, or whose GitHub issue has closed. Works on any file type. Tiny and lightning-fast. Respects your .gitignore.
 
 ## Idea
 
@@ -173,6 +173,74 @@ Two things worth checking when a recipe misbehaves: the command runs in the conf
 
 In GitHub Actions, `actions/checkout` fetches no tags by default, so the git based default finds nothing to describe. Set `fetch-depth: 0` on the checkout step, or skip git entirely with `--current-version` or `TODO_BY_VERSION`. Note that `fetch-tags: true` alone is not enough: it fetches the tag objects but leaves the clone shallow, so `git describe` still reports `No tags can describe` unless HEAD happens to be the tagged commit itself.
 
+### Issues
+
+A tag can also fire once a GitHub issue or pull request closes. Two spellings, one job each.
+
+```js
+// @todo-by #123 drop the shim once the upstream bug closes
+// @todo-by https://github.com/acme/lib/issues/45 revert when their fix lands
+```
+
+| Written as | Meaning |
+|---|---|
+| `#123` | issue or PR in the repository the git remote points at |
+| `https://github.com/o/r/issues/123` | explicit repository, any host, the only cross repository form |
+| `https://github.com/o/r/pull/123` | the same, spelled as a pull request |
+| `https://github.com/o/r/issues/123#issuecomment-456` | a comment permalink; the fragment and any query are ignored |
+| `owner/repo#123` | not supported, since the URL already says it and can also name a host |
+| `GH-123`, `gh#123`, `#12x` | reported as errors, with `#123` named as the fix |
+
+**The `#` is required**, for the same reason the `v` is on a version: it is the marker that tells this trigger from a date, a version, and from prose. A `#` not followed by an alphanumeric (`todo-by # note`) is prose and is skipped.
+
+**Any state other than open fires, `merged` included.** The close reason (`completed`, `not planned`) is never requested and never inspected. A tag on an issue closed as "not planned" therefore reports, which is deliberate: the author reads the finding and decides, and one visible finding beats a chore buried by a tool second guessing a tracker.
+
+Like versions, `--warn` never applies to issue triggers, since a future close date is not knowable ahead of time.
+
+#### Going online
+
+Checking an issue means a network call, so it never happens by default. Pass `--online` (or set `online = true` in the config, with `--offline` to override it for one run), and the check runs only when the scan actually found an issue tag.
+
+```console
+$ todo-by --online
+src/legacy.rs:8: #123 is closed (https://github.com/acme/app/issues/123): drop the shim
+1 finding
+```
+
+Without `--online`, issue tags are left unchecked and say so on stderr, without producing findings and without changing the exit code:
+
+```console
+$ todo-by
+todo-by: 2 issue tags not checked (pass --online to check GitHub)
+```
+
+There is no HTTP client inside `todo-by`. It shells out, which is what keeps the dependency list at one crate:
+
+1. `curl`, when `GH_TOKEN` or `GITHUB_TOKEN` is set and the target is github.com. The token is passed in curl's config file on stdin, so it never appears in the process list or on disk, and the request gets a 30 second timeout.
+2. `gh`, otherwise. It authenticates from its own keyring, so a laptop with `gh auth login` already done needs no setup at all.
+
+**An environment token is only ever sent to github.com.** A tag can name any host, and a tag is repository content, so a comment reading `todo-by https://evil.example/o/r/issues/1` must not be able to make a CI run hand `$GITHUB_TOKEN` to whatever host it names. Every other host goes through `gh`, which keeps credentials per host and fails closed when it has none for that one. That is also the correct behavior for GitHub Enterprise, where a github.com token is the wrong credential anyway.
+
+The identity is the same either way, since `gh` also prefers those environment variables over its keyring. If neither transport can be used, `--online` fails with exit 2 rather than skipping the check quietly. Note that `gh` has no timeout flag, so a `gh`-backed run can wait as long as the network does; the same is already true of `version-cmd` and `git describe`.
+
+All references are batched into one GraphQL request per host (up to 100 at a time), so a repository with two hundred issue tags makes two round trips, not two hundred.
+
+#### Access and private repositories
+
+- On a laptop, `gh auth login` covers public and private repositories, including organizations that enforce SSO.
+- In GitHub Actions, the built in `GITHUB_TOKEN` works for the workflow's own repository and needs `permissions: issues: read` (add `pull-requests: read` for PR references).
+- **`GITHUB_TOKEN` cannot read a different private repository**, whatever the transport. A cross repository reference into a private repo needs a fine grained PAT with Issues: Read on that repository, or a GitHub App token, held as a secret and exported as `GH_TOKEN`.
+- GitHub Enterprise works through the URL form: the host in the URL selects the API, and `gh` picks up the matching host from its own configuration.
+- The token comes from the environment only. There is no config key for it, because config files get committed.
+
+#### Which repository `#123` means
+
+The bare form resolves against the git remote, reading `origin` (or `upstream` when there is no `origin`). Two remotes that disagree, the usual fork checkout, are reported rather than guessed at, since picking one silently would resolve `#123` against somebody else's tracker. Settle it with `repo = "owner/name"` in the config, which skips remote inference entirely.
+
+A run that reaches more than one host abandons only the host that fails. An unreachable GitHub Enterprise instance says nothing about the github.com references in the same tree, so those findings are still reported (and the run still exits 2).
+
+Failures are per reference, not per run: an issue nobody can see, or a number that does not exist, reports on its own line and leaves every other finding intact. Only a failure that makes the whole batch meaningless (no credentials, a rejected token, an unreachable host) is reported once and exits 2.
+
 ## CI (GitHub Actions)
 
 Download the prebuilt static (musl) binary, verify its checksum, and run it. No Rust toolchain and no compile step, so the job finishes in about a second. Pin the version and its checksum with the two variables; both come from the release's `sha256.sum`.
@@ -215,24 +283,24 @@ warn = 14
 exclude = ["vendor/**", "*.gen.go"]
 tags = ["todo-by", "fixme-by"]
 version-cmd = "jq -r .version package.json"
+online = true
+repo = "acme/app"
 ```
 
 - `warn` (integer): same as `--warn`.
 - `exclude` (array of strings): gitignore-style globs excluded in addition to `.gitignore`. Globs are matched relative to the directory where `todo-by` runs, like ripgrep's `--glob`.
 - `tags` (array of strings): tags to match, case-insensitive. Setting this replaces the default (`todo-by`) entirely rather than adding to it.
 - `version-cmd` (string): a shell command whose trimmed stdout is the current version, used to resolve version triggers (see [Versions](#versions)). It runs via `sh -c` (on Windows, `cmd /C`) in the config file's directory, so relative paths keep working when `todo-by` is invoked from a subdirectory.
+- `online` (boolean): check issue triggers against GitHub (see [Issues](#issues)). `--online` and `--offline` both override it.
+- `repo` (string, `owner/name`): the repository bare `#123` references resolve against, instead of the git remote. github.com only; on another host, write the references as URLs.
 
 Precedence: command line flags win, then the `TODO_BY_FORMAT` / `TODO_BY_WARN` / `TODO_BY_VERSION` environment variables, then the config file.
 
 Use `--dump-config` to see the effective config and where it came from, and `--files` to see which files would be scanned.
 
-## Roadmap
-
-- GitHub issue closed trigger (`todo-by #123`)
-
 ## Prior art
 
-Inspired by [phpstan/phpstan-todo-by](https://github.com/staabm/phpstan-todo-by) by Markus Staab, which does this (and more: package version and issue triggers) for PHP files as a PHPStan extension. `todo-by` trades those triggers for working on any file type with no runtime.
+Inspired by [phpstan/phpstan-todo-by](https://github.com/staabm/phpstan-todo-by) by Markus Staab, which does this for PHP files as a PHPStan extension, with package version triggers `todo-by` does not have. `todo-by` trades those for working on any file type with no runtime.
 
 ## License
 

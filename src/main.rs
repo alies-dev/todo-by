@@ -10,6 +10,8 @@ use ignore::{WalkBuilder, WalkState};
 
 mod config;
 mod date;
+mod issue;
+mod json;
 mod output;
 mod scanner;
 mod version;
@@ -20,7 +22,8 @@ use scanner::{Finding, ScanCtx};
 use version::Version;
 
 const USAGE: &str = "\
-todo-by: flag todo-by tags whose deadline has passed or whose version has shipped
+todo-by: flag todo-by tags whose deadline has passed, whose version has shipped,
+        or whose GitHub issue has closed
 
 Usage: todo-by [OPTIONS] [PATHS]...
 
@@ -37,6 +40,9 @@ Options:
                          (default: TODO_BY_VERSION env, then config
                          version-cmd, then git describe --tags --abbrev=0)
       --warn <N>           Also report tags due within N days as warnings
+      --online             Check #123 issue triggers against GitHub
+                         (needs gh, or curl with GH_TOKEN set)
+      --offline            Never check issue triggers, overriding config
       --exit-zero          Always exit 0 on findings (still 2 on errors)
       --color <WHEN>       Color: auto, always, never [default: auto]
       --hidden             Also scan hidden files and directories
@@ -63,6 +69,9 @@ struct Cli {
     /// produces a version candidate (see the laziness contract in `main`).
     current_version: Option<String>,
     warn: Option<u32>,
+    /// Some(true) from `--online`, Some(false) from `--offline`, None when
+    /// neither was passed and the config decides.
+    online: Option<bool>,
     exit_zero: bool,
     color: ColorWhen,
     hidden: bool,
@@ -77,6 +86,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
         today: None,
         current_version: None,
         warn: None,
+        online: None,
         exit_zero: false,
         color: ColorWhen::Auto,
         hidden: false,
@@ -113,6 +123,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
                         format!("--warn must be a non-negative integer, got {raw:?}")
                     })?);
             }
+            "--online" => cli.online = Some(true),
+            "--offline" => cli.online = Some(false),
             "--exit-zero" => cli.exit_zero = true,
             "--color" => {
                 cli.color = match value("--color")?.as_str() {
@@ -201,6 +213,13 @@ fn resolve_warn(
             .map_err(|_| format!("TODO_BY_WARN must be a non-negative integer, got {v:?}"));
     }
     Ok(config_warn)
+}
+
+/// Whether this run may reach the network for issue triggers. The flags
+/// win over the config file in both directions, so `--offline` can switch
+/// off an `online = true` that a shared config turned on.
+fn resolve_online(flag: Option<bool>, config_online: Option<bool>) -> bool {
+    flag.or(config_online).unwrap_or(false)
 }
 
 /// Where the current version comes from, in precedence order. A pure
@@ -453,6 +472,37 @@ fn resolve_version_candidates(findings: &mut Vec<Finding>, current: &Version) {
     });
 }
 
+/// Applies resolved issue outcomes to the `IssuePending` findings that
+/// produced them, in the same order they were collected: fired references
+/// become `IssueClosed`, unresolvable ones `IssueError`, and open ones are
+/// dropped. Mirrors [`resolve_version_candidates`], which does the same for
+/// version constraints.
+fn resolve_issue_candidates(findings: &mut Vec<Finding>, outcomes: Vec<issue::Outcome>) {
+    let mut outcomes = outcomes.into_iter();
+    findings.retain_mut(|f| {
+        let scanner::Kind::IssuePending { written, .. } = &f.kind else {
+            return true; // not an issue candidate, keep as-is
+        };
+        let written = written.clone();
+        match outcomes.next() {
+            Some(issue::Outcome::Fired { state, url }) => {
+                f.kind = scanner::Kind::IssueClosed {
+                    written,
+                    state,
+                    url,
+                };
+                true
+            }
+            Some(issue::Outcome::Failed(detail)) => {
+                f.kind = scanner::Kind::IssueError { written, detail };
+                true
+            }
+            // Open, or (unreachable) a short outcome list: nothing to say.
+            _ => false,
+        }
+    });
+}
+
 /// Resolves whether Text output should be colored. `auto` requires a TTY
 /// stdout, an unset-or-empty `NO_COLOR`, and `TERM` other than "dumb".
 fn resolve_color(
@@ -650,8 +700,14 @@ fn main() -> ExitCode {
         }
     };
 
+    let online = resolve_online(cli.online, cfg.online);
+
     if cli.dump_config {
-        let effective = config::Config { warn, ..cfg };
+        let effective = config::Config {
+            warn,
+            online: Some(online),
+            ..cfg
+        };
         print!("{}", config::dump(&effective));
         return ExitCode::SUCCESS;
     }
@@ -773,7 +829,56 @@ fn main() -> ExitCode {
         }
     }
 
+    // Sorted BEFORE issue resolution, not just before rendering: findings
+    // arrive in whatever order the parallel walk produced them, and issue
+    // resolution batches references in that order. Sorting first makes the
+    // batches, and therefore which answers survive a failure, the same on
+    // every run over the same tree. Version resolution is order-independent
+    // and does not care either way.
     findings.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
+
+    // Same laziness contract as versions, with a stronger reason: this is
+    // the only code path in the tool that touches the network, so it runs
+    // only when the scan found an issue tag AND the run is online.
+    let pending_issues = findings
+        .iter()
+        .filter(|f| matches!(f.kind, scanner::Kind::IssuePending { .. }))
+        .count();
+    if pending_issues > 0 {
+        if online {
+            let refs: Vec<issue::Reference> = findings
+                .iter()
+                .filter_map(|f| match &f.kind {
+                    scanner::Kind::IssuePending { reference, .. } => Some(reference.clone()),
+                    _ => None,
+                })
+                .collect();
+            let configured = cfg
+                .repo
+                .as_deref()
+                .and_then(|slug| issue::Repo::parse_slug(slug, "github.com"));
+            // A request-level failure says nothing about any single
+            // reference, so it is reported once rather than once per tag.
+            // Whatever was answered before it is still applied: those
+            // findings are true, and the run exits 2 either way.
+            let (outcomes, failure) = issue::resolve(&refs, configured.as_ref(), &start_dir);
+            if let Some(err) = failure {
+                eprintln!("todo-by: {err}");
+                had_error = true;
+            }
+            resolve_issue_candidates(&mut findings, outcomes);
+        } else {
+            // Not an error: the trigger is opt-in, so "not checked" is the
+            // configured state. It is still said out loud, because a tag
+            // that silently never fires is the failure this tool exists to
+            // prevent.
+            eprintln!(
+                "todo-by: {pending_issues} issue tag{} not checked (pass --online to check GitHub)",
+                if pending_issues == 1 { "" } else { "s" }
+            );
+            findings.retain(|f| !matches!(f.kind, scanner::Kind::IssuePending { .. }));
+        }
+    }
 
     let opts = RenderOpts {
         format,
@@ -1257,5 +1362,93 @@ mod tests {
         assert!(run_version_cmd("true", &dir).is_err());
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn issue_pending(written: &str) -> Finding {
+        Finding {
+            file: "f".to_string(),
+            line: 1,
+            kind: scanner::Kind::IssuePending {
+                written: written.to_string(),
+                reference: issue::Reference::parse(written).expect("valid reference"),
+            },
+            message: "msg".to_string(),
+        }
+    }
+
+    #[test]
+    fn online_flags_win_over_the_config_in_both_directions() {
+        assert!(!resolve_online(None, None));
+        assert!(resolve_online(None, Some(true)));
+        assert!(resolve_online(Some(true), None));
+        assert!(resolve_online(Some(true), Some(false)));
+        assert!(!resolve_online(Some(false), Some(true)));
+    }
+
+    #[test]
+    fn issue_outcomes_apply_in_collection_order() {
+        let mut findings = vec![
+            issue_pending("#1"),
+            version_pending(">=v9.0", "kept"),
+            issue_pending("#2"),
+            issue_pending("#3"),
+        ];
+        resolve_issue_candidates(
+            &mut findings,
+            vec![
+                issue::Outcome::Fired {
+                    state: "closed",
+                    url: "https://github.com/o/r/issues/1".to_string(),
+                },
+                // The version finding in between must not consume an
+                // outcome: the two candidate kinds are resolved separately.
+                issue::Outcome::Open,
+                issue::Outcome::Failed("no access".to_string()),
+            ],
+        );
+        assert_eq!(findings.len(), 3);
+        assert!(matches!(
+            &findings[0].kind,
+            scanner::Kind::IssueClosed { written, state, url }
+                if written == "#1" && *state == "closed" && url.ends_with("/issues/1")
+        ));
+        assert!(matches!(
+            &findings[1].kind,
+            scanner::Kind::VersionPending { .. }
+        ));
+        assert!(matches!(
+            &findings[2].kind,
+            scanner::Kind::IssueError { written, detail } if written == "#3" && detail == "no access"
+        ));
+    }
+
+    #[test]
+    fn a_short_outcome_list_drops_the_unanswered_candidates() {
+        let mut findings = vec![issue_pending("#1"), issue_pending("#2")];
+        resolve_issue_candidates(&mut findings, vec![issue::Outcome::Open]);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn answers_collected_before_a_failure_survive_it() {
+        // A request that failed after an earlier one succeeded must not take
+        // the earlier answer down with it: that finding is true, and the run
+        // already reports the failure and exits 2.
+        let mut findings = vec![issue_pending("#1"), issue_pending("#2")];
+        resolve_issue_candidates(
+            &mut findings,
+            vec![
+                issue::Outcome::Fired {
+                    state: "closed",
+                    url: "https://github.com/o/r/issues/1".to_string(),
+                },
+                issue::Outcome::Unanswered,
+            ],
+        );
+        assert_eq!(findings.len(), 1);
+        assert!(matches!(
+            &findings[0].kind,
+            scanner::Kind::IssueClosed { written, .. } if written == "#1"
+        ));
     }
 }

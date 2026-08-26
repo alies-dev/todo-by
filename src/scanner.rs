@@ -42,6 +42,31 @@ pub enum Kind {
     InvalidTrigger {
         written: String,
     },
+    /// A syntactically valid issue reference whose state the scanner can't
+    /// judge, for the same reason as `VersionPending`: answering needs the
+    /// network, which the scanner never touches. main.rs resolves these
+    /// after the scan into `IssueClosed`, `IssueError`, or a dropped
+    /// finding. Never reaches output rendering.
+    IssuePending {
+        written: String,
+        reference: crate::issue::Reference,
+    },
+    /// The referenced issue or pull request is no longer open. `state` is
+    /// the word to print (`closed`, `merged`); the close reason is never
+    /// requested, so it is never rendered.
+    IssueClosed {
+        written: String,
+        state: &'static str,
+        url: String,
+    },
+    /// An issue trigger that can't be acted on: unusable syntax, or a
+    /// reference this run couldn't resolve (unknown repo, no access, no git
+    /// remote). Both carry their own explanation, since unlike the version
+    /// forms there is no single remedy to name.
+    IssueError {
+        written: String,
+        detail: String,
+    },
 }
 
 pub struct Finding {
@@ -142,6 +167,9 @@ fn match_line_from<'a>(
             }
             if j == ws_start {
                 continue;
+            }
+            if let Some(end) = parse_issue_span(bytes, j) {
+                return Some((&line[j..end], clean_message(&line[end..]), end));
             }
             if let Some(end) = parse_bare_span(bytes, j) {
                 return Some((&line[j..end], clean_message(&line[end..]), end));
@@ -279,6 +307,86 @@ fn parse_version_span(bytes: &[u8], start: usize) -> Option<usize> {
     Some(trim_trailing_html_comment_dashes(bytes, j))
 }
 
+/// Returns the end of an issue reference at `start`, or None when there
+/// isn't one. Two shapes commit: `#` followed by an alphanumeric, and an
+/// `http://` or `https://` URL.
+///
+/// The `#` must be followed by an alphanumeric, so `todo-by # note` stays
+/// prose and is skipped the way any unrecognized trigger always has been.
+/// Once it commits the whole token is consumed (`#12x`, `#0`) rather than
+/// truncated to a valid-looking prefix, for the same reason dates and
+/// versions are: a truncated `#12x` would resolve to issue 12 and report on
+/// the wrong ticket, which is worse than an error naming the typo.
+///
+/// A URL runs to whitespace, minus a trailing `*/`, minus trailing sentence
+/// punctuation, and minus an HTML comment closer. `<` and `>` end the span
+/// outright since neither is legal unescaped in a URL, which is what lets
+/// the closer be recognized at all. A URL written mid-prose is far more
+/// often followed by a period than by a path segment ending in one.
+fn parse_issue_span(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut j = start;
+    if bytes.get(j) == Some(&b'#') {
+        if !bytes.get(j + 1).is_some_and(u8::is_ascii_alphanumeric) {
+            return None;
+        }
+        j += 1;
+        while bytes
+            .get(j)
+            .is_some_and(|&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+        {
+            j += 1;
+        }
+        // `.` is inside the charset above so a typo like `#1.2` reaches its
+        // validator whole, but a trailing one is sentence punctuation, not
+        // part of the reference: `#123. drop the shim` must resolve issue
+        // 123, not report `#123.` as unusable. Same rule as the URL branch.
+        return Some(trim_trailing_html_comment_dashes(
+            bytes,
+            trim_trailing_sentence_punctuation(bytes, start, j),
+        ));
+    }
+    if !(bytes[j..].starts_with(b"https://") || bytes[j..].starts_with(b"http://")) {
+        return None;
+    }
+    while bytes
+        .get(j)
+        .is_some_and(|&b| b.is_ascii() && !b.is_ascii_whitespace() && !matches!(b, b'<' | b'>'))
+    {
+        j += 1;
+    }
+    if bytes[start..j].ends_with(b"*/") {
+        j -= 2;
+    }
+    let j = trim_trailing_sentence_punctuation(bytes, start, j);
+    let end = trim_trailing_html_comment_dashes(bytes, j);
+    // Unlike `#`, a URL is not a marker: it carries no signal that its
+    // author meant a trigger at all. Prose mentioning the tag next to a
+    // link is common (this repository's own Homebrew formula documents
+    // `brew tap alies-dev/todo-by https://github.com/alies-dev/todo-by`),
+    // so a URL commits only when it is genuinely an issue or pull-request
+    // URL, and anything else stays prose. The `#` form keeps the opposite
+    // rule and reports its typos, because there the marker already said a
+    // trigger was intended.
+    let span = std::str::from_utf8(&bytes[start..end]).ok()?;
+    crate::issue::Reference::parse(span).map(|_| end)
+}
+
+/// Gives back punctuation that ends a sentence rather than the trigger, so
+/// a reference written mid-prose (`#123. drop the shim`, or a URL followed
+/// by a comma) keeps its meaning. Never trims past `start`, so a span made
+/// entirely of punctuation cannot appear.
+fn trim_trailing_sentence_punctuation(bytes: &[u8], start: usize, mut end: usize) -> usize {
+    while end > start
+        && matches!(
+            bytes[end - 1],
+            b'.' | b',' | b';' | b':' | b')' | b'"' | b'\''
+        )
+    {
+        end -= 1;
+    }
+    end
+}
+
 /// Both `-` and `.` sit in the date and version charsets above, so a
 /// trigger written just before an HTML comment closer (a tag reading
 /// `2026-09-01-->` or `>=2.0-->`, no space before `-->`) would
@@ -298,7 +406,19 @@ fn trim_trailing_html_comment_dashes(bytes: &[u8], end: usize) -> usize {
 
 fn clean_message(rest: &str) -> String {
     let mut msg = rest.trim_start();
-    if let Some(stripped) = msg.strip_prefix('-').or_else(|| msg.strip_prefix(':')) {
+    // A trigger written flush against an HTML comment closer leaves that
+    // closer at the head of the message: the span parsers hand the two
+    // hyphens back (see `trim_trailing_html_comment_dashes`) rather than
+    // swallow them, so they arrive here. Strip the whole closer before the
+    // leading `-`/`:` strip below, which would otherwise leave a stray `->`.
+    if let Some(stripped) = msg.strip_prefix("-->") {
+        msg = stripped.trim_start();
+    }
+    // Punctuation joining the trigger to its message, dropped so the
+    // message reads as prose. `.` and `,` are in the set for the URL form:
+    // a URL span gives back the sentence punctuation that followed it
+    // (`.../issues/7. remove this`), which would otherwise open the message.
+    if let Some(stripped) = msg.strip_prefix(['-', ':', '.', ',']) {
         msg = stripped.trim_start();
     }
     for closer in ["*/", "-->", "#}", "}}"] {
@@ -373,6 +493,22 @@ fn classify(written: &str, ctx: &ScanCtx) -> Option<Kind> {
     // of silently reclassifying an empty span.
     debug_assert!(!written.is_empty());
     let bytes = written.as_bytes();
+    // Issue references are told apart by their own marker, before any of
+    // the date/version reasoning below: nothing in either of those forms
+    // starts with `#` or a URL scheme. Resolving one needs the network, so
+    // like a version constraint it becomes a pending candidate for main.rs.
+    if bytes[0] == b'#' || written.starts_with("http") {
+        return Some(match crate::issue::Reference::parse(written) {
+            Some(reference) => Kind::IssuePending {
+                written: written.to_string(),
+                reference,
+            },
+            None => Kind::IssueError {
+                written: written.to_string(),
+                detail: crate::issue::syntax_help(written),
+            },
+        });
+    }
     let prefixed = matches!(bytes[0], b'v' | b'V');
     let bare = prefixed || bytes[0].is_ascii_digit();
     // For an unmarked span the byte right after the leading digits picks
@@ -1202,5 +1338,154 @@ mod tests {
         let (written, msg) = match_line(&line, &todo_by_tags).unwrap();
         assert_eq!(written, bad);
         assert_eq!(msg, "typo");
+    }
+
+    /// The tag text, deliberately never written as a literal that is
+    /// followed by a trigger: the tag word written next to a reference
+    /// anywhere in this file would be a live tag and would flag the
+    /// repository's own dogfood scan, the same reason the date tests
+    /// build their input at runtime.
+    const TAG: &str = "todo-by";
+
+    fn issue_kind(line: &str) -> Kind {
+        let ctx = ScanCtx {
+            today: Date::new(2026, 8, 26).unwrap(),
+            warn_until: None,
+            tags: &todo_by(),
+        };
+        let mut findings = Vec::new();
+        scan_text("f", line, &ctx, &mut findings);
+        assert_eq!(findings.len(), 1, "expected one finding for {line:?}");
+        findings.pop().expect("one finding").kind
+    }
+
+    #[test]
+    fn matches_both_issue_spellings_and_trims_surrounding_syntax() {
+        let cases = [
+            (format!("// {TAG} #123 drop shim"), "#123", "drop shim"),
+            (format!("<!-- {TAG} #99 polyfill -->"), "#99", "polyfill"),
+            (format!("<!-- {TAG} #99--> tail"), "#99", "tail"),
+            (
+                format!("// {TAG} https://github.com/o/r/issues/7 - cross repo"),
+                "https://github.com/o/r/issues/7",
+                "cross repo",
+            ),
+            (
+                format!("// {TAG} https://github.com/o/r/pull/7. sentence"),
+                "https://github.com/o/r/pull/7",
+                "sentence",
+            ),
+            (
+                format!("/* {TAG} https://github.com/o/r/issues/7*/"),
+                "https://github.com/o/r/issues/7",
+                "",
+            ),
+            (
+                format!("<!-- {TAG} https://github.com/o/r/issues/7--> tail"),
+                "https://github.com/o/r/issues/7",
+                "tail",
+            ),
+        ];
+        for (line, written, message) in cases {
+            assert_eq!(
+                match_line(&line, &todo_by()),
+                Some((written, message.to_string())),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn sentence_punctuation_after_a_reference_is_not_part_of_it() {
+        for (line, written) in [
+            (format!("// {TAG} #123. drop the shim"), "#123"),
+            (format!("// {TAG} #123, drop the shim"), "#123"),
+            (format!("// {TAG} #123) drop the shim"), "#123"),
+        ] {
+            let (got, _) = match_line(&line, &todo_by()).expect("matched");
+            assert_eq!(got, written, "{line}");
+        }
+        // An interior dot is still part of the token, so a typo reaches its
+        // validator whole instead of resolving to the wrong issue.
+        assert_eq!(
+            match_line(&format!("// {TAG} #1.2 typo"), &todo_by()),
+            Some(("#1.2", "typo".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_permalink_with_a_fragment_is_still_a_trigger() {
+        let line = format!("// {TAG} https://github.com/o/r/issues/12#issuecomment-9 drop it");
+        let (written, message) = match_line(&line, &todo_by()).expect("matched");
+        assert_eq!(written, "https://github.com/o/r/issues/12#issuecomment-9");
+        assert_eq!(message, "drop it");
+        assert!(matches!(issue_kind(&line), Kind::IssuePending { .. }));
+    }
+
+    #[test]
+    fn a_lone_hash_is_prose_not_a_trigger() {
+        for line in [
+            format!("// {TAG} # not a reference"),
+            format!("// {TAG} #"),
+            format!("// {TAG} http"),
+        ] {
+            assert_eq!(match_line(&line, &todo_by()), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn a_url_that_is_not_an_issue_link_stays_prose() {
+        // A URL is not a marker the way `#` is, so prose that mentions the
+        // tag next to a link (the repository's own Homebrew formula does)
+        // must not turn into a finding.
+        for line in [
+            format!("#   brew tap alies-dev/{TAG} https://github.com/alies-dev/{TAG}"),
+            format!("// {TAG} https://github.com/o/r"),
+            format!("// {TAG} https://example.com/"),
+            format!("// {TAG} https://github.com/o/r/commits/1"),
+        ] {
+            assert_eq!(match_line(&line, &todo_by()), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn valid_references_become_pending_candidates() {
+        assert!(matches!(
+            issue_kind(&format!("// {TAG} #123 msg")),
+            Kind::IssuePending { ref written, .. } if written == "#123"
+        ));
+        assert!(matches!(
+            issue_kind(&format!("// {TAG} https://github.com/o/r/issues/7 msg")),
+            Kind::IssuePending { .. }
+        ));
+    }
+
+    #[test]
+    fn unusable_hash_references_report_rather_than_vanish() {
+        for line in [
+            format!("// {TAG} #0 msg"),
+            format!("// {TAG} #12x msg"),
+            format!("// {TAG} #1.2 msg"),
+        ] {
+            assert!(
+                matches!(issue_kind(&line), Kind::IssueError { .. }),
+                "expected an error finding for {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_issue_and_a_date_on_one_line_are_two_findings() {
+        let ctx = ScanCtx {
+            today: Date::new(2026, 8, 26).unwrap(),
+            warn_until: None,
+            tags: &todo_by(),
+        };
+        let mut findings = Vec::new();
+        let line = format!("// {TAG} #5 and {TAG} 2020-01-01 both");
+        scan_text("f", &line, &ctx, &mut findings);
+        assert_eq!(findings.len(), 2);
+        assert!(matches!(findings[0].kind, Kind::IssuePending { .. }));
+        assert!(matches!(findings[1].kind, Kind::Overdue { .. }));
     }
 }

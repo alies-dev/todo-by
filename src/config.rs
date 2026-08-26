@@ -8,6 +8,7 @@
 //! - Entries look like `key = value` with bare keys matching `[A-Za-z0-9_-]+`.
 //! - Values are one of:
 //!   - an unsigned integer (must fit in `u32` for `warn`),
+//!   - `true` or `false`,
 //!   - a basic double-quoted string with escapes `\"`, `\\`, `\n`, `\t`
 //!     (any other escape is an error),
 //!   - an array of basic strings. Arrays may span multiple lines until the
@@ -17,8 +18,9 @@
 //!   `[`), duplicate keys, literal single-quoted strings, and unknown keys.
 //!
 //! Recognized keys: `warn` (integer), `exclude` (string array), `tags`
-//! (string array), `version-cmd` (string). Errors are formatted as
-//! `label:LINE: message` with 1-based line numbers.
+//! (string array), `version-cmd` (string), `online` (boolean), `repo`
+//! (string, `owner/name`). Errors are formatted as `label:LINE: message`
+//! with 1-based line numbers.
 
 use std::path::{Path, PathBuf};
 
@@ -26,7 +28,7 @@ use std::path::{Path, PathBuf};
 /// order: `todo-by.toml` wins over `.todo-by.toml` in the same directory.
 const CONFIG_FILENAMES: [&str; 2] = ["todo-by.toml", ".todo-by.toml"];
 
-const VALID_KEYS: &str = "warn, exclude, tags, version-cmd";
+const VALID_KEYS: &str = "warn, exclude, tags, version-cmd, online, repo";
 
 #[derive(Debug)]
 pub struct Config {
@@ -36,6 +38,12 @@ pub struct Config {
     /// trimmed stdout is the current version, for resolving
     /// version-constraint triggers.
     pub version_cmd: Option<String>,
+    /// Whether issue triggers may reach the network. `--online` and
+    /// `--offline` both override this.
+    pub online: Option<bool>,
+    /// Repository (`owner/name`) that bare `#123` references resolve
+    /// against, overriding git-remote inference.
+    pub repo: Option<String>,
     /// gitignore-style globs excluded on top of .gitignore.
     pub exclude: Vec<String>,
     /// Tags to match. Replaces the default entirely when set in the file.
@@ -49,6 +57,8 @@ impl Default for Config {
         Self {
             warn: None,
             version_cmd: None,
+            online: None,
+            repo: None,
             exclude: Vec::new(),
             tags: vec!["todo-by".to_string()],
             source: None,
@@ -81,6 +91,7 @@ pub fn load(start: &Path) -> Result<Config, String> {
 /// recognized field.
 enum Value {
     Int(u32),
+    Bool(bool),
     /// A basic double-quoted string; currently only `version-cmd` accepts
     /// this shape.
     Str(String),
@@ -92,6 +103,8 @@ pub fn parse(text: &str, label: &str) -> Result<Config, String> {
     let lines: Vec<&str> = text.lines().collect();
     let mut warn: Option<u32> = None;
     let mut version_cmd: Option<String> = None;
+    let mut online: Option<bool> = None;
+    let mut repo: Option<String> = None;
     let mut exclude: Option<Vec<String>> = None;
     let mut tags: Option<Vec<String>> = None;
     let mut seen_keys: Vec<&str> = Vec::new();
@@ -153,6 +166,23 @@ pub fn parse(text: &str, label: &str) -> Result<Config, String> {
                 }
                 version_cmd = Some(s);
             }
+            "online" => {
+                let Value::Bool(b) = value else {
+                    return Err(format!("{label}:{line_no}: online must be true or false"));
+                };
+                online = Some(b);
+            }
+            "repo" => {
+                let Value::Str(s) = value else {
+                    return Err(format!("{label}:{line_no}: repo must be a string"));
+                };
+                if crate::issue::Repo::parse_slug(&s, "github.com").is_none() {
+                    return Err(format!(
+                        "{label}:{line_no}: invalid repo {s:?} (write \"owner/name\")"
+                    ));
+                }
+                repo = Some(s);
+            }
             "exclude" => {
                 let Value::Array(items) = value else {
                     return Err(format!(
@@ -201,6 +231,8 @@ pub fn parse(text: &str, label: &str) -> Result<Config, String> {
     Ok(Config {
         warn,
         version_cmd,
+        online,
+        repo,
         exclude: exclude.unwrap_or_default(),
         tags: tags.unwrap_or_else(|| vec!["todo-by".to_string()]),
         source: None,
@@ -255,6 +287,17 @@ fn parse_scalar(value_part: &str, label: &str, line_no: usize) -> Result<Value, 
             "{label}:{line_no}: single-quoted strings are not supported, use double quotes"
         ));
     }
+    for (word, value) in [("true", true), ("false", false)] {
+        if let Some(after) = value_part.strip_prefix(word) {
+            let after = after.trim_start();
+            if after.is_empty() || after.starts_with('#') {
+                return Ok(Value::Bool(value));
+            }
+            return Err(format!(
+                "{label}:{line_no}: unexpected trailing content after boolean"
+            ));
+        }
+    }
     if bytes[0].is_ascii_digit() {
         let end = value_part
             .find(|c: char| !c.is_ascii_digit())
@@ -272,7 +315,7 @@ fn parse_scalar(value_part: &str, label: &str, line_no: usize) -> Result<Value, 
         return Ok(Value::Int(n));
     }
     Err(format!(
-        "{label}:{line_no}: expected a string, integer, or array"
+        "{label}:{line_no}: expected a string, integer, boolean, or array"
     ))
 }
 
@@ -408,6 +451,14 @@ pub fn dump(cfg: &Config) -> String {
     match &cfg.version_cmd {
         Some(cmd) => out.push_str(&format!("version-cmd = \"{}\"\n", escape_str(cmd))),
         None => out.push_str("# version-cmd = (not set)\n"),
+    }
+    match cfg.online {
+        Some(b) => out.push_str(&format!("online = {b}\n")),
+        None => out.push_str("# online = (not set)\n"),
+    }
+    match &cfg.repo {
+        Some(slug) => out.push_str(&format!("repo = \"{}\"\n", escape_str(slug))),
+        None => out.push_str("# repo = (not set)\n"),
     }
     out.push_str(&format!("exclude = {}\n", dump_array(&cfg.exclude)));
     out.push_str(&format!("tags = {}\n", dump_array(&cfg.tags)));

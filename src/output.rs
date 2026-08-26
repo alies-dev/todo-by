@@ -111,6 +111,17 @@ fn invalid_date_message(written: &str) -> String {
     format!("invalid date {written}")
 }
 
+/// Phrase for a fired issue trigger. The `#123` form gets the resolved URL
+/// appended, since the tag itself doesn't say which repository it landed
+/// on; a tag written as a URL already carries it and isn't repeated.
+fn issue_closed_phrase(written: &str, state: &str, url: &str) -> String {
+    if written.starts_with('#') {
+        format!("{written} is {state} ({url})")
+    } else {
+        format!("{written} is {state}")
+    }
+}
+
 fn render_text(f: &Finding, opts: &RenderOpts) -> String {
     let (phrase, color) = match &f.kind {
         Kind::Overdue { written, .. } => (format!("overdue since {written}"), RED),
@@ -127,8 +138,14 @@ fn render_text(f: &Finding, opts: &RenderOpts) -> String {
             (format!("version {current} reached ({written})"), RED)
         }
         Kind::InvalidTrigger { written } => (invalid_trigger_message(written), RED),
-        Kind::VersionPending { .. } => {
-            unreachable!("resolved into VersionReached or dropped in main")
+        Kind::IssueClosed {
+            written,
+            state,
+            url,
+        } => (issue_closed_phrase(written, state, url), RED),
+        Kind::IssueError { detail, .. } => (detail.clone(), RED),
+        Kind::VersionPending { .. } | Kind::IssuePending { .. } => {
+            unreachable!("resolved or dropped in main")
         }
     };
     let phrase = if opts.color {
@@ -165,8 +182,17 @@ fn render_github(f: &Finding, today: Date, current_version: Option<&str>) -> Str
             "error",
             format!("todo-by {}", invalid_trigger_message(written)),
         ),
-        Kind::VersionPending { .. } => {
-            unreachable!("resolved into VersionReached or dropped in main")
+        Kind::IssueClosed {
+            written,
+            state,
+            url,
+        } => (
+            "error",
+            format!("todo-by {}", issue_closed_phrase(written, state, url)),
+        ),
+        Kind::IssueError { detail, .. } => ("error", format!("todo-by {detail}")),
+        Kind::VersionPending { .. } | Kind::IssuePending { .. } => {
+            unreachable!("resolved or dropped in main")
         }
     };
     format!(
@@ -235,16 +261,38 @@ fn render_json_finding(f: &Finding, today: Date, current_version: Option<&str>) 
                 escape_json(&f.message)
             )
         }
-        Kind::VersionPending { .. } => {
-            unreachable!("resolved into VersionReached or dropped in main")
+        Kind::IssueClosed {
+            written,
+            state,
+            url,
+        } => format!(
+            "{{\"type\":\"finding\",\"kind\":\"issue-closed\",\"path\":\"{}\",\"line\":{},\
+             \"reference\":\"{}\",\"state\":\"{state}\",\"url\":\"{}\",\"message\":\"{}\"}}",
+            escape_json(&f.file),
+            f.line,
+            escape_json(written),
+            escape_json(url),
+            escape_json(&f.message)
+        ),
+        Kind::IssueError { written, detail } => format!(
+            "{{\"type\":\"finding\",\"kind\":\"issue-error\",\"path\":\"{}\",\"line\":{},\
+             \"reference\":\"{}\",\"detail\":\"{}\",\"message\":\"{}\"}}",
+            escape_json(&f.file),
+            f.line,
+            escape_json(written),
+            escape_json(detail),
+            escape_json(&f.message)
+        ),
+        Kind::VersionPending { .. } | Kind::IssuePending { .. } => {
+            unreachable!("resolved or dropped in main")
         }
     }
 }
 
-/// Splits findings into error-level (Overdue, InvalidDate, VersionReached,
-/// InvalidTrigger) and warning-level (DueSoon) counts; also drives the exit
-/// code in main. VersionPending never reaches here: main.rs resolves every
-/// such finding into VersionReached or drops it before rendering.
+/// Splits findings into error-level (everything except DueSoon) and
+/// warning-level (DueSoon) counts; also drives the exit code in main. The
+/// pending kinds never reach here: main.rs resolves each one or drops it
+/// before rendering.
 pub fn counts(findings: &[Finding]) -> (usize, usize) {
     let errors = findings
         .iter()
@@ -255,6 +303,8 @@ pub fn counts(findings: &[Finding]) -> (usize, usize) {
                     | Kind::InvalidDate { .. }
                     | Kind::VersionReached { .. }
                     | Kind::InvalidTrigger { .. }
+                    | Kind::IssueClosed { .. }
+                    | Kind::IssueError { .. }
             )
         })
         .count();
@@ -678,5 +728,97 @@ mod tests {
         assert_eq!(gh_escape_property("50%,done"), "50%25%2Cdone");
         assert_eq!(gh_escape_data("line1\nline2, 50%"), "line1%0Aline2, 50%25");
         assert_eq!(gh_escape_data("cr\rlf"), "cr%0Dlf");
+    }
+
+    fn issue_finding(kind: Kind) -> Finding {
+        Finding {
+            file: "src/a.rs".to_string(),
+            line: 4,
+            kind,
+            message: "drop the shim".to_string(),
+        }
+    }
+
+    fn closed(written: &str, state: &'static str) -> Kind {
+        Kind::IssueClosed {
+            written: written.to_string(),
+            state,
+            url: "https://github.com/o/r/issues/9".to_string(),
+        }
+    }
+
+    #[test]
+    fn issue_findings_render_in_every_format() {
+        let opts = RenderOpts {
+            format: Format::Text,
+            color: false,
+            today: Date::new(2026, 8, 26).unwrap(),
+            current_version: None,
+        };
+        let f = issue_finding(closed("#9", "closed"));
+        assert_eq!(
+            render_finding(&f, &opts),
+            "src/a.rs:4: #9 is closed (https://github.com/o/r/issues/9): drop the shim"
+        );
+        let gh = render_github(&f, opts.today, None);
+        assert!(gh.starts_with("::error file=src/a.rs,line=4,"), "{gh}");
+        assert!(gh.contains("#9 is closed"), "{gh}");
+        let json = render_json_finding(&f, opts.today, None);
+        assert!(json.contains(r#""kind":"issue-closed""#), "{json}");
+        assert!(json.contains(r##""reference":"#9""##), "{json}");
+        assert!(json.contains(r#""state":"closed""#), "{json}");
+        assert!(
+            json.contains(r#""url":"https://github.com/o/r/issues/9""#),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn a_url_reference_does_not_repeat_itself() {
+        let written = "https://github.com/o/r/issues/9";
+        assert_eq!(
+            issue_closed_phrase(written, "merged", "https://github.com/o/r/issues/9"),
+            "https://github.com/o/r/issues/9 is merged"
+        );
+        assert_eq!(
+            issue_closed_phrase("#9", "merged", "https://github.com/o/r/issues/9"),
+            "#9 is merged (https://github.com/o/r/issues/9)"
+        );
+    }
+
+    #[test]
+    fn issue_errors_render_their_own_detail() {
+        let f = issue_finding(Kind::IssueError {
+            written: "#12x".to_string(),
+            detail: "invalid issue reference".to_string(),
+        });
+        let opts = RenderOpts {
+            format: Format::Text,
+            color: false,
+            today: Date::new(2026, 8, 26).unwrap(),
+            current_version: None,
+        };
+        assert_eq!(
+            render_finding(&f, &opts),
+            "src/a.rs:4: invalid issue reference: drop the shim"
+        );
+        let json = render_json_finding(&f, opts.today, None);
+        assert!(json.contains(r#""kind":"issue-error""#), "{json}");
+        assert!(
+            json.contains(r#""detail":"invalid issue reference""#),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn issue_findings_count_as_errors() {
+        let findings = vec![
+            issue_finding(closed("#9", "merged")),
+            issue_finding(Kind::IssueError {
+                written: "#1".to_string(),
+                detail: "no access".to_string(),
+            }),
+        ];
+        assert_eq!(counts(&findings), (2, 0));
     }
 }
