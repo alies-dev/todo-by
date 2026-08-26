@@ -1,4 +1,5 @@
 # Dogfood config for scanning this repository.
 exclude = [
     "README.md", # usage examples carry realistic dates
+    "docs/**",   # same, one page per trigger kind
 ]

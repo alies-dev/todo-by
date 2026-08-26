@@ -8,21 +8,16 @@
   <a href="LICENSE"><img src="https://img.shields.io/crates/l/todo-by-cli.svg" alt="license"></a>
 </p>
 
-Flag `todo-by` tags whose deadline has passed, or whose target version has shipped. Works on any file type. Tiny and lightning-fast. Respects your .gitignore.
+Flag `todo-by` tags whose deadline has passed, whose target version has shipped, or whose GitHub issue has closed. Works on any file type. Tiny and lightning-fast. Respects your .gitignore.
 
 ## Idea
 
-Tag any comment with a deadline date:
+Tag any comment with a deadline. `todo-by` scans the tree and exits non-zero once one has passed, so it gates CI. It finds the tag in any comment style (docblocks, `//`, `#`, `--`, HTML) because it works on plain text, not language grammars.
 
 ```js
 // @todo-by 2026-09-01 - Remove this legacy controller once signed URLs ship
-```
-
-```yaml
 # todo-by 2026-09 drop the legacy webhook once v2 ships
 ```
-
-`todo-by` scans the tree, validates each date, and exits non-zero when a deadline has passed, so it gates CI. It recognizes the tag in any comment style (docblocks, `//`, `#`, `--`, HTML, and so on) because it works on plain text, not language grammars.
 
 ```console
 $ todo-by
@@ -32,15 +27,9 @@ config/legacy.yml:42: overdue since 2026-06-26: drop the legacy webhook once v2 
 
 ## What it's for
 
-Date-triggered chores rot in a backlog. "Remove once v2 ships" becomes a ticket nobody reopens, disconnected from the code it was about. `todo-by` welds the reminder to that code and lets the date, not a person, decide when it comes due.
+Date-triggered chores rot in a backlog. "Remove once v2 ships" becomes a ticket nobody reopens, disconnected from the code it was about. `todo-by` welds the reminder to that code and lets the trigger, not a person, decide when it comes due.
 
-Reach for a tag when the task is:
-
-- **Small.** Anyone can finish it in a minute or two with zero extra context.
-- **Mechanical.** A cleanup (delete, revert, re-enable), not new work to design.
-- **Triggered.** It comes due on a date, a released version, or a downstream change.
-
-If it needs an owner or a conversation, use a real tracker instead. `todo-by` is the layer beneath the tracker, for the small stuff a tracker would only bury.
+Reach for a tag when the task is **small** (a minute or two, no extra context), **mechanical** (delete, revert, re-enable, not new work to design), and **triggered** (a date, a released version, a downstream change). If it needs an owner or a conversation, use a real tracker. `todo-by` is the layer beneath the tracker, for the small stuff a tracker would only bury.
 
 ## Installation
 
@@ -85,22 +74,18 @@ Exit codes: `0` no findings (warnings alone still exit 0), `1` findings, `2` usa
 
 ## Triggers
 
-### Dates
+Three kinds, each with a marker so a tag is never guessed at: dates carry dashes, versions a lowercase `v`, issues a `#`. A number with no marking is reported as an error naming the fix, never interpreted.
 
-Dates are written with dashes, to a month or to a day. A tag becomes overdue the day its deadline is reached.
+### Dates
 
 | Written as | Deadline |
 |---|---|
 | `2026-09-01` | that day |
 | `2026-09` | last day of that month |
 
-A month is the coarsest precision. A year on its own (`2026`) is not a deadline, because it cannot be told apart from a version constraint (see [Versions](#versions)); such a tag is reported as an error naming both replacements, `2026-12` or `v2026`. Impossible dates (for example `2026-02-30`) are reported as findings too, so typos cannot silently postpone a deadline forever.
+A month is the coarsest precision. A year on its own (`2026`) is not a deadline, since it cannot be told apart from a version; such a tag is reported with both replacements named, `2026-12` or `v2026`. Impossible dates (`2026-02-30`) and dotted ones (`2026.09.01`, which reads equally as a calendar version) are reported too, so a typo cannot silently postpone a deadline forever.
 
-Dates use dashes. A dotted date (`2026.09.01`) is reported as an error, because it reads equally as a calendar version (see [Versions](#versions)); the message names both spellings so you can pick one.
-
-#### Warn ahead
-
-`--warn N` reports tags due within N days as warnings rather than errors, so a deadline surfaces in CI before it starts failing the build. It still exits 0.
+`--warn N` reports tags due within N days as warnings instead of errors, and still exits 0, so a deadline surfaces in CI before it starts failing the build. In `--format github` those render as `::warning`.
 
 ```console
 $ todo-by --warn 14
@@ -108,107 +93,62 @@ src/legacy.rs:8: due in 5 days (2026-07-14): drop the feature flag
 1 warning
 ```
 
-In `--format github`, warnings render as `::warning` annotations instead of `::error`.
-
 ### Versions
-
-A tag can also fire once the project reaches a version, instead of a date. Write the version with a lowercase `v`, on its own or after a comparator.
 
 ```js
 // @todo-by v2.0 drop legacy endpoint after v2 ships
 // @todo-by >v2.0 drop it only after 2.0 itself is out
 ```
 
-The tag fires the moment the project's current version satisfies the constraint. A version without a comparator means `>=`, which is what almost every cleanup tag wants.
-
-**The `v` is required.** It is what tells a version from a date, so a tag is never guessed at: dates are the ones with dashes, versions are the ones with a `v`, and a number carrying neither marking is reported as an error naming the fix. That matters because a tag sits in prose, where an unmarked number reads two ways at once. `2026.09.01` is both a dotted deadline and a calendar version, `12.5.2026` is both a day first date and a three component version, and `3.5` is both a constraint and the start of "3.5 hours of work". Guessing at any of those risks the worst outcome this tool has: a guess of "version" produces a constraint the project never reaches, and an unreached constraint reports nothing at all, so the chore is buried instead of surfaced.
-
 | Written as | Meaning |
 |---|---|
 | `v2.0`, `>=v2.0`, `>= v2.0` | fires once the current version is 2.0 or later |
 | `v2026.01` | calendar version, fires once the current version is 2026.1 or later |
 | `>v2.0` | fires once the current version is later than 2.0 |
-| `2.0`, `>=2.0`, `2026.09.01` | rejected, with the marked spelling as the fix |
-| `V2.0` | rejected, the marker is lowercase only |
-| `<`, `<=`, `=`, `==`, `^`, `~` | recognized but rejected as findings, not silently ignored |
+| `2.0`, `>=2.0`, `V2.0`, `<v1.0`, `^v1.0` | rejected as findings, never silently ignored |
 
-A space after the comparator is allowed, so `>= v2.0` and `>=v2.0` are the same tag.
+Only `>=` and `>` exist, because this tool cannot fire on something it never observes. `--warn` does not apply. The current version comes from `--current-version`, then `TODO_BY_VERSION`, then the `version-cmd` config key, then `git describe --tags --abbrev=0`, resolved once and only when a version tag is actually found.
 
-The current version is a separate matter: `--current-version`, `TODO_BY_VERSION`, `version-cmd`, and `git describe` all accept a bare `1.2.3`, since those strings come from the project rather than from a tag author. The marker is required only where the ambiguity exists, which is inside the tag.
+See [docs/versions.md](https://github.com/alies-dev/todo-by/blob/main/docs/versions.md) for the resolution ladder, the `version-cmd` cookbook, and why the marker is mandatory.
 
-Only `>=` and `>` are supported. Writing `<v1.0` to mean "before version 1.0" is a natural reach, and so is borrowing `^v1.0` or `~v1.0` from a package manager, but this tool has no way to fire on something it can never observe (a version that is never released, or one above a ceiling), so it reports those as invalid rather than quietly never firing.
+### Issues
 
-Unlike dates, `--warn` never applies to version triggers: a future version isn't knowable ahead of time the way a future date is.
+```js
+// @todo-by #123 drop the shim once the upstream bug closes
+// @todo-by https://github.com/acme/lib/issues/45 revert when their fix lands
+```
 
-`todo-by` resolves the current version once, only when the scan finds at least one version tag, in this order.
-
-1. `--current-version <X>` on the command line.
-2. The `TODO_BY_VERSION` environment variable.
-3. The `version-cmd` config key: a shell command whose trimmed stdout is the version, for example `version-cmd = "jq -r .version package.json"`. It runs in the config file's own directory, so a relative path (like `package.json` above) resolves against the file that declared it, not against wherever `todo-by` was invoked.
-4. `git describe --tags --abbrev=0`, with a leading `v` or `V` stripped. This runs in the directory `todo-by` was invoked in, not the config file's directory: git already walks upward on its own to find the repository, and a config file discovered above the actual repository (a monorepo layout, for example) would otherwise point git at the wrong one.
-
-Whichever source wins, a resolved version keeps only its tag. The markers `git describe` appends when HEAD is past the tag (`v1.2.3-4-gabc123`) or the tree is dirty (`v1.2.3-dirty`) are stripped, so both read as `1.2.3`. Semver counts those suffixes as a pre-release, which sorts below the release it was built from, so without the strip a commit four past `v1.2.3` would compare as not having reached `1.2.3` and a `>=v1.2.3` tag would produce no finding at all. The built-in default avoids the suffix through `--abbrev=0`, but a `version-cmd` such as `git describe --tags` does not. A genuine pre-release (`1.2.3-rc.1`) keeps its suffix and still sorts below `1.2.3`, which is correct.
-
-`version-cmd` runs a shell command taken from the config file, so treat it the same as any other command a repository can make CI run, and only enable it in repositories you trust. It executes only when the scan actually finds a version tag, never on every run.
-
-Worth knowing where that command can come from: config discovery walks from the current directory upward, so the file that supplies `version-cmd` is not necessarily inside the repository being scanned. A `todo-by.toml` in a parent directory (or in your home directory) applies to everything below it. Use `--dump-config` to see which file won, and `--current-version` or `TODO_BY_VERSION` to bypass the config path entirely.
-
-#### version-cmd cookbook
-
-`todo-by` deliberately does not parse build manifests. Inferring a version from a build system is how a linter starts lying to you: a missing version fails loudly (exit 2), a wrongly guessed one silently changes when your tags fire. So the extraction stays a command you write and can verify.
-
-Anything printing the version on stdout works. Output is trimmed, and a leading `v` is stripped. These recipes assume a POSIX shell, since `version-cmd` runs through `sh -c`; on Windows it runs through `cmd /C`, so `cat` becomes `type` and the sourcing trick at the bottom needs a `for /f` loop instead.
-
-| Version lives in | `version-cmd` |
+| Written as | Meaning |
 |---|---|
-| `package.json` | `jq -r .version package.json` |
-| `package.json`, without jq | `node -p "require('./package.json').version"` |
-| `Cargo.toml` | `cargo metadata --no-deps --format-version 1 \| jq -r .packages[0].version` |
-| `pyproject.toml` | `python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"` |
-| `pom.xml` | `mvn -q -DforceStdout help:evaluate -Dexpression=project.version` |
-| `gradle.properties` | `gradle -q properties \| awk '/^version:/ {print $2}'` |
-| `Chart.yaml` (Helm) | `yq -r .version Chart.yaml` |
-| A plain `VERSION` file | `cat VERSION` |
-| A key and value file (OpenSSL style) | `. ./VERSION.dat && echo "$MAJOR.$MINOR.$PATCH"` |
+| `#123` | issue or PR in the repository the git remote points at |
+| `https://github.com/o/r/issues/123` | explicit repository, any host, the only cross repository form |
+| `https://github.com/o/r/pull/123` | the same, spelled as a pull request |
+| `.../issues/123#issuecomment-456` | a comment permalink; fragment and query are ignored |
+| `owner/repo#123`, `repo#123`, `GH-123` | rejected, naming the spelling to use instead |
 
-Go and PHP projects usually keep no version in a manifest at all, so the git tag default already covers them. Nothing else needed.
+Any state other than open fires, `merged` included; the close reason is never inspected. `--warn` does not apply.
 
-Two things worth checking when a recipe misbehaves: the command runs in the config file's directory (so relative paths resolve against the config file, not the invocation directory), and it must print the version alone, since the whole trimmed stdout is the version.
+Checking an issue means a network call, so it never happens unless `--online` (or `online = true`) is set, and even then only when the scan found an issue tag. Lookups shell out to `curl` or `gh`, and an environment token is only ever sent to github.com.
 
-In GitHub Actions, `actions/checkout` fetches no tags by default, so the git based default finds nothing to describe. Set `fetch-depth: 0` on the checkout step, or skip git entirely with `--current-version` or `TODO_BY_VERSION`. Note that `fetch-tags: true` alone is not enough: it fetches the tag objects but leaves the clone shallow, so `git describe` still reports `No tags can describe` unless HEAD happens to be the tagged commit itself.
+See [docs/issues.md](https://github.com/alies-dev/todo-by/blob/main/docs/issues.md) for transports, private repositories, and failure semantics.
 
 ## CI (GitHub Actions)
 
-Download the prebuilt static (musl) binary, verify its checksum, and run it. No Rust toolchain and no compile step, so the job finishes in about a second. Pin the version and its checksum with the two variables; both come from the release's `sha256.sum`.
+Download the prebuilt musl binary, verify its checksum, run it. No toolchain, no compile step, about a second per job.
 
 ```yaml
-name: todo-by
-on: [push, pull_request]
-
-jobs:
-  todo-by:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Check overdue todo-by tags
-        env:
-          TODOBY_VERSION: v0.2.1
-          TODOBY_SHA256: 2a2d0396a592a16ab211604fdb1e860586676a1a0785a9c89cbfb377fe9d9234
-        run: |
-          ASSET="todo-by-cli-x86_64-unknown-linux-musl.tar.xz"
-          curl --proto '=https' --tlsv1.2 -sSfL \
-            "https://github.com/alies-dev/todo-by/releases/download/${TODOBY_VERSION}/${ASSET}" -o /tmp/todo-by.tar.xz
-          echo "${TODOBY_SHA256}  /tmp/todo-by.tar.xz" | sha256sum -c -
-          tar -xJf /tmp/todo-by.tar.xz -C /tmp
-          /tmp/todo-by-cli-x86_64-unknown-linux-musl/todo-by
+- name: Check overdue todo-by tags
+  run: |
+    curl --proto '=https' --tlsv1.2 -sSfL "$URL" -o /tmp/todo-by.tar.xz
+    echo "$SHA256  /tmp/todo-by.tar.xz" | sha256sum -c -
+    tar -xJf /tmp/todo-by.tar.xz -C /tmp && /tmp/*/todo-by
 ```
 
-On a codebase with existing overdue tags, phase it in with `continue-on-error: true` on the step, or `todo-by --warn N --exit-zero` so deadlines surface without failing the build. Shorter but less strict: the release also ships an installer script (`curl ... todo-by-cli-installer.sh | sh`). Other methods (`cargo install todo-by-cli --locked`, Homebrew) work too. See [Installation](#installation).
+Full workflow, checksum pinning, and how to phase it in on a codebase that already has overdue tags: [docs/ci.md](https://github.com/alies-dev/todo-by/blob/main/docs/ci.md).
 
 ## What gets scanned
 
-Everything git would track. `todo-by` uses ripgrep's directory walker, so `.gitignore` files are honored with full git semantics (nested files, negation, `**` globs, `.git/info/exclude`), including outside a git repository. Hidden files, binary files, and symlinks are skipped; pass `--hidden` to include hidden files. A file named explicitly on the command line is always scanned. The config file's `exclude` patterns are applied on top of `.gitignore`, using the same glob syntax.
+Everything git would track. `todo-by` uses ripgrep's directory walker, so `.gitignore` is honored with full git semantics (nested files, negation, `**` globs, `.git/info/exclude`), even outside a repository. Hidden, binary and symlinked files are skipped; `--hidden` includes hidden ones. A file named on the command line is always scanned.
 
 ## Configuration
 
@@ -219,24 +159,24 @@ warn = 14
 exclude = ["vendor/**", "*.gen.go"]
 tags = ["todo-by", "fixme-by"]
 version-cmd = "jq -r .version package.json"
+online = true
+repo = "acme/app"
 ```
 
 - `warn` (integer): same as `--warn`.
-- `exclude` (array of strings): gitignore-style globs excluded in addition to `.gitignore`. Globs are matched relative to the directory where `todo-by` runs, like ripgrep's `--glob`.
-- `tags` (array of strings): tags to match, case-insensitive. Setting this replaces the default (`todo-by`) entirely rather than adding to it.
-- `version-cmd` (string): a shell command whose trimmed stdout is the current version, used to resolve version triggers (see [Versions](#versions)). It runs via `sh -c` (on Windows, `cmd /C`) in the config file's directory, so relative paths keep working when `todo-by` is invoked from a subdirectory.
+- `exclude` (array): gitignore-style globs excluded on top of `.gitignore`, matched relative to where `todo-by` runs.
+- `tags` (array): tags to match, case-insensitive. Replaces the default (`todo-by`) rather than adding to it.
+- `version-cmd` (string): shell command whose trimmed stdout is the current version. Runs via `sh -c` (`cmd /C` on Windows) in the config file's directory, so relative paths survive being invoked from a subdirectory. See [docs/versions.md](https://github.com/alies-dev/todo-by/blob/main/docs/versions.md).
+- `online` (boolean): check issue triggers against GitHub. `--online` and `--offline` both override it. See [docs/issues.md](https://github.com/alies-dev/todo-by/blob/main/docs/issues.md).
+- `repo` (string, `owner/name`): repository that bare `#123` references resolve against, instead of the git remote. github.com only; elsewhere write URLs.
 
 Precedence: command line flags win, then the `TODO_BY_FORMAT` / `TODO_BY_WARN` / `TODO_BY_VERSION` environment variables, then the config file.
 
 Use `--dump-config` to see the effective config and where it came from, and `--files` to see which files would be scanned.
 
-## Roadmap
-
-- GitHub issue closed trigger (`todo-by #123`)
-
 ## Prior art
 
-Inspired by [phpstan/phpstan-todo-by](https://github.com/staabm/phpstan-todo-by) by Markus Staab, which does this (and more: package version and issue triggers) for PHP files as a PHPStan extension. `todo-by` trades those triggers for working on any file type with no runtime.
+Inspired by [phpstan/phpstan-todo-by](https://github.com/staabm/phpstan-todo-by) by Markus Staab.
 
 ## License
 

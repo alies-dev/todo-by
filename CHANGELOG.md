@@ -7,9 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Issue triggers: a tag can fire when a GitHub issue or pull request closes. Write `#123` for the repository the git remote points at, or a full issue or pull request URL for any other repository or host. `owner/repo#123` is not supported, since the URL already says the same thing and can also name a host. Any state other than open fires, `merged` included; the close reason is never requested and never inspected.
+- The issue spellings other tools accept (`owner/repo#123` and `GH-123`, which GitHub autolinks, and `repo#123`, which phpstan-todo-by takes) are reported rather than ignored, each naming the accepted spelling; the cross repository form quotes the exact URL to write instead. A token carrying neither marker (a `#` with a digit behind it, or the `GH-` form) stays prose, so a project matching on `todo` does not have every undated TODO reported.
+- Issue URLs may carry a fragment or a query, so a comment permalink pasted straight from GitHub (`.../issues/123#issuecomment-456`) names issue 123 rather than being ignored as prose.
+- `--online` (and the `online` config key, with `--offline` to override it) gates every network call. Without it, issue tags are left unchecked and reported once on stderr, with no findings and no change to the exit code. The check runs only when the scan actually found an issue tag, so a tree of date tags stays hermetic.
+- Issue lookups go through `curl` when `GH_TOKEN` or `GITHUB_TOKEN` is set and the target is github.com (the token travels in curl's config file on stdin, never in argv or on disk, with a timeout of 30 seconds), and through `gh` otherwise, which authenticates from its own keyring. An environment token is never sent to any other host, since a tag names its own host and a tag is repository content. References are batched into one GraphQL request per host, up to 100 at a time.
+- `repo` config key (`owner/name`): the repository bare `#123` references resolve against. Without it the git remote decides, and two remotes that disagree (a fork checkout) are reported rather than guessed at.
+- `online` and `repo` config keys, plus boolean values in the config parser.
+
 ### Changed
 
 - Minimum supported Rust version raised from 1.85 to 1.88. The `ignore` dependency declares `rust-version = "1.88"` from 0.4.31 on, so 1.85 no longer resolves a working dependency set.
+
+### Fixed
+
+- A trigger written flush against an HTML comment closer, with no space before the `-->`, left a stray `->` at the head of the finding's message. The closer is now stripped from the message the way it was already kept out of the trigger span.
 
 ## [0.3.0] - 2026-07-26
 
