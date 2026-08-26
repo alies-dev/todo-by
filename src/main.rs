@@ -1,11 +1,11 @@
 // The whole point of `crate::stdout` and `note!` is that they are the only
 // ways out. A `println!` or `eprintln!` anywhere else reintroduces the
-// panic they exist to remove, so the compiler, not a reviewer, is what
-// keeps them from coming back.
+// panic they exist to remove, so clippy, not a reviewer, is what keeps
+// them from coming back (CI runs it with `-D warnings`).
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
 use std::ffi::OsStr;
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -609,10 +609,11 @@ fn build_overrides(root: &Path, patterns: &[String]) -> Result<Option<Override>,
         .map_err(|err| format!("invalid exclude patterns: {err}"))
 }
 
-/// Metadata directories no scan should ever enter. Each one stores commit
-/// messages, and the last two store whole copies of tracked files as well,
-/// so walking them turns one tag into a phantom finding at a path nobody
-/// can edit, or into a duplicate of a finding already reported.
+/// Metadata directories no scan should ever enter. Each one keeps commit
+/// text in plain files, and `.svn/pristine` keeps whole copies of tracked
+/// files, so walking one turns a single tag into a phantom finding at a
+/// path nobody can edit, or into a duplicate of a finding already
+/// reported. `.jj` does both, depending on its backend.
 const VCS_DIRS: [&str; 4] = [".git", ".hg", ".svn", ".jj"];
 
 fn is_vcs_dir(name: &OsStr) -> bool {
@@ -733,7 +734,14 @@ fn scan_roots(
                             io_error.store(true, Ordering::Relaxed);
                         }
                         for finding in local {
-                            let _ = tx.send(finding);
+                            // The receiver is `rx`, which this function
+                            // holds until every walker thread has joined,
+                            // so a send failure means a finding was
+                            // dropped on the floor rather than reported.
+                            // Naming that keeps a later streaming
+                            // refactor from losing findings silently.
+                            tx.send(finding)
+                                .expect("findings receiver outlives the walk");
                         }
                     }
                 }
