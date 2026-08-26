@@ -621,12 +621,17 @@ fn is_vcs_dir(name: &OsStr) -> bool {
 
 /// True when `path` names one of [`VCS_DIRS`] or sits inside one, whether
 /// it is the usual directory or the plain file a git worktree gets.
-/// Resolved first, so that running from within one is caught as well as
-/// naming it: a relative root carries no such component of its own.
+///
+/// Both spellings are checked, because neither covers the other. The
+/// resolved path catches a root that carries no such component of its
+/// own: a relative `.` run from inside `.git`, or a symlink pointing at
+/// one. The path as written catches the reverse, a symlink *under* a
+/// metadata directory whose target lies outside it (`.git/hooks` is the
+/// plausible one), since resolving that erases the very component being
+/// matched on.
 fn inside_vcs_dir(path: &Path) -> bool {
-    let resolved = std::fs::canonicalize(path);
-    let probe = resolved.as_deref().unwrap_or(path);
-    probe.components().any(|c| is_vcs_dir(c.as_os_str()))
+    let names_one = |p: &Path| p.components().any(|c| is_vcs_dir(c.as_os_str()));
+    names_one(path) || std::fs::canonicalize(path).is_ok_and(|resolved| names_one(&resolved))
 }
 
 /// The roots `walk_builder` will drop, phrased for the user. Dropping
@@ -645,6 +650,23 @@ fn skipped_root_notices(roots: &[PathBuf]) -> Vec<String> {
             )
         })
         .collect()
+}
+
+/// Whether the roots given leave the walk nothing to start from because
+/// every one of them was dropped as version control metadata.
+///
+/// That run scanned nothing at all, and from the outside it is
+/// indistinguishable from a clean scan: no output, exit 0. The same
+/// reasoning that makes [`skipped_root_notices`] worth printing makes the
+/// exit code worth setting, and the neighbouring missing-path check
+/// already exits 2 for a root that could not be scanned. A run that kept
+/// at least one root is not this case: it scanned what it was given, and
+/// the notice names what it left out.
+///
+/// Empty roots means none were given (a bare `todo-by -`), which is not a
+/// dropped root and not an error.
+fn every_root_dropped(roots: &[PathBuf]) -> bool {
+    !roots.is_empty() && roots.iter().all(|root| inside_vcs_dir(root))
 }
 
 /// The walker configuration both scanning modes share, so `--files` and
@@ -895,6 +917,7 @@ fn main() -> ExitCode {
     for notice in skipped_root_notices(&fs_paths) {
         note!("{notice}");
     }
+    had_error = had_error || every_root_dropped(&fs_paths);
 
     if cli.files {
         let (paths, walk_error) = list_file_paths(&fs_paths, overrides);
@@ -1789,6 +1812,24 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn a_symlink_under_a_metadata_dir_is_dropped_even_when_it_escapes() {
+        // The mirror of the test above, and the case resolving alone gets
+        // wrong: canonicalizing `.git/hooks/link` erases the `.git`
+        // component it was going to be matched on, so the target gets
+        // walked under a path the docs promise is never reached. Matching
+        // the path as written is what stops it.
+        let root = walk_fixture("escape");
+        let link = root.join(".git").join("escape");
+        std::os::unix::fs::symlink(root.join("worktree"), &link).unwrap();
+        assert!(
+            walked(std::slice::from_ref(&link), &root, None).is_empty(),
+            "a symlink under .git reached its target"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn a_file_named_on_the_command_line_is_scanned_even_when_gitignored() {
         // The walker never filters a root it was handed directly, which is
         // what lets an explicitly named path defeat .gitignore. Only the
@@ -1821,6 +1862,27 @@ mod tests {
             assert!(notice.contains("never scanned"), "{notice}");
         }
         assert!(notices[0].contains(&git.display().to_string()));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn dropping_every_root_is_an_error_but_dropping_some_is_not() {
+        let root = walk_fixture("all-dropped");
+        let git = root.join(".git");
+
+        assert!(
+            every_root_dropped(&[git.clone(), git.join("logs")]),
+            "nothing was left to scan, which must not exit 0"
+        );
+        assert!(
+            !every_root_dropped(&[root.clone(), git.clone()]),
+            "a run that still scanned a root is not an error"
+        );
+        assert!(
+            !every_root_dropped(&[]),
+            "no roots at all means stdin, not a dropped root"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }
