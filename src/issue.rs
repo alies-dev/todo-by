@@ -41,9 +41,9 @@ const REMEDY: &str = "authenticate with `gh auth login`, or set GH_TOKEN \
 /// the API base is derived rather than stored.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Repo {
-    pub host: String,
-    pub owner: String,
-    pub name: String,
+    host: String,
+    owner: String,
+    name: String,
 }
 
 impl Repo {
@@ -66,6 +66,12 @@ impl Repo {
         })
     }
 
+    /// `owner/name`, the spelling the `repo` config key uses. The only
+    /// reason anything outside this module reads the parts.
+    pub fn slug(&self) -> String {
+        format!("{}/{}", self.owner, self.name)
+    }
+
     fn graphql_url(&self) -> String {
         if self.host == "github.com" {
             "https://api.github.com/graphql".to_string()
@@ -74,9 +80,13 @@ impl Repo {
         }
     }
 
-    fn issue_url(&self, number: u32) -> String {
+    /// Web URL for a reference. `/issues/N` redirects to a pull request on
+    /// its own, so it is the right default when the kind is unknown; a
+    /// merged state is proof of a pull request, and linking it as one saves
+    /// the reader a redirect.
+    fn web_url(&self, number: u32, kind: &str) -> String {
         format!(
-            "https://{}/{}/{}/issues/{number}",
+            "https://{}/{}/{}/{kind}/{number}",
             self.host, self.owner, self.name
         )
     }
@@ -126,8 +136,8 @@ fn valid_host(s: &str) -> bool {
 /// resolved once per run rather than once per tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reference {
-    pub repo: Option<Repo>,
-    pub number: u32,
+    repo: Option<Repo>,
+    number: u32,
 }
 
 impl Reference {
@@ -153,7 +163,10 @@ impl Reference {
         let rest = rest.split(['#', '?']).next()?;
         let (host, path) = rest.split_once('/')?;
         let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-        let [owner, name, kind, number] = segments[..] else {
+        // Leading segments are allowed so a GitHub Enterprise instance
+        // served from a subpath parses here the same way `build_repo`
+        // already accepts it from a git remote.
+        let [.., owner, name, kind, number] = segments[..] else {
             return None;
         };
         if !matches!(kind, "issues" | "pull") || !valid_host(host) {
@@ -387,11 +400,11 @@ fn outcome_for(state: &str, repo: &Repo, number: u32) -> Outcome {
         "OPEN" => Outcome::Open,
         "MERGED" => Outcome::Fired {
             state: "merged",
-            url: repo.issue_url(number),
+            url: repo.web_url(number, "pull"),
         },
         _ => Outcome::Fired {
             state: "closed",
-            url: repo.issue_url(number),
+            url: repo.web_url(number, "issues"),
         },
     }
 }
@@ -415,11 +428,12 @@ fn batches(targets: &[Result<(usize, u32), String>], repos: &[Repo]) -> Vec<Vec<
             .copied()
             .filter(|(repo, _)| repos[*repo].host == host)
             .collect();
-        // Sorting by repository is load-bearing, not tidiness: `request`
-        // opens a new `rN:` block every time the repository changes, so
-        // references interleaved across repositories in source order
-        // (`r0#1`, `r1#2`, `r0#3`) would emit the `r0` alias twice in one
-        // query and the API would reject the whole batch. The sort is
+        // Sorted by repository so each one gets exactly one `rN:` block.
+        // `request` opens a new block every time the repository changes, so
+        // references interleaved in source order (`r0#1`, `r1#2`, `r0#3`)
+        // would otherwise emit `r0` twice. GraphQL merges identical fields
+        // and would accept that, but it makes the query larger than it
+        // needs to be and its shape depend on scan order. The sort is
         // stable, so numbers keep their source order inside each block.
         keys.sort_by_key(|(repo, _)| *repo);
         out.extend(keys.chunks(BATCH).map(<[(usize, u32)]>::to_vec));
@@ -609,6 +623,17 @@ enum Transport {
 /// correct for GitHub Enterprise, where a github.com token is the wrong
 /// credential anyway.
 fn choose_transport(host: &str, token: Option<String>) -> Result<Transport, String> {
+    // curl's config format is line-oriented, so a newline inside the token
+    // would end the header line and let the rest be read as further
+    // directives. Escaping quotes and backslashes does not cover that, and a
+    // real token never contains one, so it is refused rather than sanitized.
+    // Checked here, where the transport is built, so an unusable token
+    // cannot be handed to one request at a time.
+    if token.as_deref().is_some_and(|t| t.contains(['\n', '\r'])) {
+        return Err(
+            "the GitHub token contains a line break; check the environment variable".to_string(),
+        );
+    }
     match token {
         Some(token) if host == "github.com" && have("curl") => Ok(Transport::Curl(token)),
         _ if have("gh") => Ok(Transport::Gh),
@@ -723,15 +748,6 @@ fn send_gh(repo: &Repo, body: &str, trusted: bool) -> Result<String, String> {
 /// because it can run to tens of kilobytes on one line and old curl builds
 /// cap config line length. The file holds no secret, so writing it is safe.
 fn send_curl(token: &str, url: &str, body: &str) -> Result<String, String> {
-    // curl's config format is line-oriented, so a newline inside the token
-    // would end the header line and let the rest be read as further
-    // directives. Escaping quotes and backslashes does not cover that, and a
-    // real token never contains one, so it is refused rather than sanitized.
-    if token.contains(['\n', '\r']) {
-        return Err(
-            "the GitHub token contains a line break; check the environment variable".to_string(),
-        );
-    }
     let path = stage_body(body)?;
     let mut cmd = Command::new("curl");
     // `--silent --show-error` rather than `--no-progress-meter`, which curl
@@ -1327,6 +1343,30 @@ mod tests {
     }
 
     #[test]
+    fn a_merged_pull_request_is_linked_as_one() {
+        let repo = repo("github.com", "o", "r");
+        match outcome_for("MERGED", &repo, 9) {
+            // Merged is proof of a pull request, so the reader is not sent
+            // through the /issues/N redirect.
+            Outcome::Fired { url, .. } => assert_eq!(url, "https://github.com/o/r/pull/9"),
+            _ => panic!("expected a fired outcome"),
+        }
+    }
+
+    #[test]
+    fn a_subpath_hosted_url_parses_like_its_remote_does() {
+        // `build_repo` already takes the last two segments from a remote;
+        // a URL in a comment now accepts the same shape.
+        assert_eq!(
+            Reference::parse("https://git.acme.corp/scm/team/app/issues/4"),
+            Some(Reference {
+                repo: Some(repo("git.acme.corp", "team", "app")),
+                number: 4
+            })
+        );
+    }
+
+    #[test]
     fn reads_states_and_per_reference_errors() {
         let response = r#"{"data":{"r0":{"n1":{"state":"OPEN"},"n2":{"state":"MERGED"},
                            "n3":null}},"errors":[{"path":["r0","n3"],
@@ -1494,10 +1534,15 @@ mod tests {
     }
 
     #[test]
-    fn a_token_with_a_line_break_is_refused_before_anything_spawns() {
-        let err =
-            send_curl("tok\nen", "https://api.github.com/graphql", "{}").expect_err("refused");
-        assert!(err.contains("line break"), "{err}");
+    fn a_token_with_a_line_break_is_refused_when_the_transport_is_built() {
+        // Refused once, where the transport is chosen, rather than per
+        // request: an unusable token should never reach a spawn at all.
+        for bad in ["tok\nen", "token\r"] {
+            let Err(err) = choose_transport("github.com", Some(bad.to_string())) else {
+                panic!("expected {bad:?} to be refused");
+            };
+            assert!(err.contains("line break"), "{err}");
+        }
     }
 
     #[test]

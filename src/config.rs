@@ -458,11 +458,7 @@ pub fn dump(cfg: &Config) -> String {
         None => out.push_str("# online = (not set)\n"),
     }
     match &cfg.repo {
-        Some(repo) => out.push_str(&format!(
-            "repo = \"{}/{}\"\n",
-            escape_str(&repo.owner),
-            escape_str(&repo.name)
-        )),
+        Some(repo) => out.push_str(&format!("repo = \"{}\"\n", escape_str(&repo.slug()))),
         None => out.push_str("# repo = (not set)\n"),
     }
     out.push_str(&format!("exclude = {}\n", dump_array(&cfg.exclude)));
@@ -776,8 +772,7 @@ tags = [\"todo-by\"]
         let repo = cfg.repo.expect("parsed");
         // Lowercased on the way in, so two spellings of one repository
         // cannot read as two.
-        assert_eq!((repo.owner.as_str(), repo.name.as_str()), ("acme", "app"));
-        assert_eq!(repo.host, "github.com");
+        assert_eq!(repo.slug(), "acme/app");
         for text in [
             "repo = \"acme\"",
             "repo = \"acme/\"",

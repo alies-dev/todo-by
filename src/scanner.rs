@@ -349,10 +349,12 @@ fn parse_issue_span(bytes: &[u8], start: usize) -> Option<usize> {
         // part of the reference: `#123. drop the shim` must resolve issue
         // 123, not report `#123.` as unusable. Same rule as the URL branch.
         //
-        // The closer comes off FIRST. `trim_trailing_html_comment_dashes`
-        // only fires when the next byte is `>`, so trimming punctuation
-        // ahead of it would strand the `--` in `#123.-->` and report a
-        // perfectly good reference as unusable.
+        // The closer comes off FIRST, because removing it is what turns the
+        // period into a trailing character at all. In `#123.-->` the token
+        // ends `.--`, so a punctuation pass run first sees the `-` and does
+        // nothing; the closer then goes and leaves `#123.`, which fails to
+        // parse. Closer first leaves `#123.`, and the punctuation pass
+        // finishes the job.
         let j = trim_trailing_html_comment_dashes(bytes, j);
         return Some(trim_trailing_sentence_punctuation(bytes, start, j));
     }
@@ -372,8 +374,9 @@ fn parse_issue_span(bytes: &[u8], start: usize) -> Option<usize> {
         j -= 2;
     }
     // Closer first, punctuation second: see the `#` branch above. Reversed,
-    // a URL written `.../issues/7.-->` keeps its `--`, fails to parse, and
-    // (since a URL is not a marker) vanishes with no finding at all.
+    // a URL written `.../issues/7.-->` keeps the period the closer was
+    // hiding, fails to parse, and (since a URL is not a marker) vanishes
+    // with no finding at all.
     let j = trim_trailing_html_comment_dashes(bytes, j);
     let end = trim_trailing_sentence_punctuation(bytes, start, j);
     // Unlike `#`, a URL is not a marker: it carries no signal that its
@@ -395,7 +398,8 @@ fn parse_issue_span(bytes: &[u8], start: usize) -> Option<usize> {
 /// These commit for the same reason a malformed date does: `#` with a digit
 /// behind it says the author meant a trigger, so the tag earns an error
 /// naming the accepted spelling instead of vanishing into prose. GitHub
-/// renders all three as issue links, so people type them.
+/// autolinks `owner/repo#123` and `GH-123`, and phpstan-todo-by takes
+/// `repo#123`, so people type all three.
 ///
 /// The marker requirement is what keeps this from becoming a plain-TODO
 /// linter. Tags are configurable, so a project may match on `todo`, and
