@@ -76,6 +76,21 @@ struct Cli {
     color: ColorWhen,
     files: bool,
     dump_config: bool,
+    /// Notices for flags kept only so an existing invocation keeps
+    /// working. `main` prints them once, to stderr, before it does
+    /// anything else. Empty on almost every run.
+    deprecated: Vec<&'static str>,
+}
+
+/// Records that a retired flag was passed. Deliberately not an error: the
+/// CLI surface is frozen once a version ships, so a CI job carrying the
+/// flag has to keep running until the next major release removes it. Each
+/// notice says what the flag does now and when it goes, and repeats of the
+/// same flag collapse into one line.
+fn deprecate(cli: &mut Cli, notice: &'static str) {
+    if !cli.deprecated.contains(&notice) {
+        cli.deprecated.push(notice);
+    }
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
@@ -90,6 +105,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
         color: ColorWhen::Auto,
         files: false,
         dump_config: false,
+        deprecated: Vec::new(),
     };
     let mut args = args;
     while let Some(arg) = args.next() {
@@ -156,14 +172,17 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
                 }
             }
             // Hidden files are scanned unconditionally now, so this flag
-            // asks for what already happens. It stays accepted, and stays
-            // silent, because the CLI surface is frozen after a release and
-            // a CI job passing it must neither fail nor start printing on
-            // every run. It is out of --help: there is nothing to choose.
-            // todo-by v1.0 delete this arm and its entry in VALUELESS.
-            // A major bump is the point at which dropping an accepted flag
-            // stops being a breaking change made by surprise.
-            "--hidden" => {}
+            // asks for what already happens. Out of --help, since there is
+            // nothing left to choose, but still accepted, and now saying so
+            // rather than going quiet until the day it disappears.
+            // todo-by v1.0 delete this arm, its entry in VALUELESS, and the
+            // notice below. A major bump is the point at which dropping an
+            // accepted flag stops being a breaking change made by surprise.
+            "--hidden" => deprecate(
+                &mut cli,
+                "--hidden does nothing: hidden files are scanned by default. \
+                 The flag is accepted until 1.0 and will be removed there.",
+            ),
             "--files" => cli.files = true,
             "--dump-config" => cli.dump_config = true,
             "-h" | "--help" => {
@@ -703,6 +722,13 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+
+    // Before anything that can fail or find something, so the notice is
+    // not buried under findings, and on stderr so it never lands in
+    // --files output or a JSON stream.
+    for notice in &cli.deprecated {
+        eprintln!("todo-by: {notice}");
+    }
 
     let format = match resolve_format(
         cli.format,
@@ -1444,6 +1470,20 @@ mod tests {
         assert_eq!(cli.online, Some(true));
         assert!(cli.exit_zero);
         assert_eq!(cli.paths, vec![PathBuf::from(".")]);
+    }
+
+    #[test]
+    fn a_retired_flag_is_accepted_and_reported_once() {
+        // Accepted, so a pinned CI job keeps running; reported, so the
+        // removal at 1.0 is not the first thing anyone hears about it.
+        let quiet = parse_args(args(&["--exit-zero"])).expect("valid");
+        assert!(quiet.deprecated.is_empty(), "a normal run must stay silent");
+
+        let cli = parse_args(args(&["--hidden", "--hidden"])).expect("valid");
+        assert_eq!(cli.deprecated.len(), 1, "repeats collapse into one notice");
+        let notice = cli.deprecated[0];
+        assert!(notice.contains("--hidden"), "{notice}");
+        assert!(notice.contains("1.0"), "must say when it goes: {notice}");
     }
 
     #[test]

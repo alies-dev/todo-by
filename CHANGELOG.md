@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Hidden files and directories are scanned by default. Being hidden is no longer a reason to skip anything: the ignore files and the `exclude` config key decide alone, which is what "everything git would track" already claimed. A tag in `.github/workflows` (a pinned action version, a step commented out until a fix lands) was silently never checked, which is the exact failure this tool exists to prevent. Repositories that keep tags in dotfiles will see findings they did not see before, and `exclude` is how to quiet a large dotted directory that `.gitignore` does not cover.
-- `--hidden` asks for what now always happens, so it does nothing. It is still accepted, and still silent, so a CI job already passing it keeps working; it no longer appears in `--help`.
+- `--hidden` asks for what now always happens, so it does nothing. It is still accepted, so a CI job already passing it keeps working, and it no longer appears in `--help`. Passing it prints a deprecation notice on stderr naming the release that removes it, 1.0. Notices are collected during parsing and printed once, before any finding, so the next retired flag costs a line rather than a design.
 
 ### Fixed
 
