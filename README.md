@@ -54,10 +54,14 @@ brew install alies-dev/todo-by/todo-by
 Cargo:
 
 ```console
-cargo install todo-by-cli
+cargo install todo-by-cli --locked
 ```
 
+`--locked` builds against the dependency versions this project tests, which are the ones the stated minimum Rust version is verified against. Without it, cargo resolves fresh versions that may need a newer compiler.
+
 Or grab a prebuilt binary from [Releases](https://github.com/alies-dev/todo-by/releases).
+
+The minimum supported Rust version is 1.88. It tracks the floor of the one dependency (`ignore`, ripgrep's directory walker) and can rise in any release, including a patch.
 
 ## Usage
 
