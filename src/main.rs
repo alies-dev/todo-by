@@ -568,24 +568,36 @@ fn build_overrides(root: &Path, patterns: &[String]) -> Result<Option<Override>,
         .map_err(|err| format!("invalid exclude patterns: {err}"))
 }
 
-/// The walker both scanning modes share, so that `--files` can never
-/// report a different set of files than the scan actually reads.
+/// True when `path` is a `.git` directory or sits inside one. Resolved
+/// first, so that running from within `.git` is caught as well as naming
+/// it: a relative root carries no `.git` component of its own.
+fn inside_git_dir(path: &Path) -> bool {
+    let resolved = std::fs::canonicalize(path);
+    let probe = resolved.as_deref().unwrap_or(path);
+    probe.components().any(|c| c.as_os_str() == ".git")
+}
+
+/// The walker configuration both scanning modes share, so `--files` and
+/// the scan can never walk a different tree. The sets they report still
+/// differ by the binary files the scan drops after the walk yields them.
 ///
-/// Hidden files are walked: what git tracks is the promise this tool
-/// makes, and `.github/workflows` is one of the most natural homes for a
-/// dated tag. `.gitignore` stays the only filter, with one exception:
-/// `.git` itself is never walked, at any depth. Nothing in it is tracked
-/// content, and `.git/COMMIT_EDITMSG` and `.git/logs` hold commit
-/// messages, so a commit that merely *discusses* a tag would otherwise be
-/// read as carrying one. Matching on the name rather than on a path also
-/// catches the `.git` of a submodule or a nested checkout, and the `.git`
-/// *file* a worktree gets instead of a directory.
+/// `.gitignore` decides what is scanned, hidden entries included, with one
+/// exception: `.git` is never walked. Nothing in it is tracked content,
+/// and `.git/COMMIT_EDITMSG` and `.git/logs` hold commit messages, so a
+/// commit that merely *discusses* a tag would otherwise read as carrying
+/// one.
 ///
-/// Returns `None` for an empty root list, which `ignore` cannot build.
+/// The exclusion matches on the entry name rather than on a path, so it
+/// catches the `.git` of a submodule or a nested checkout as well, and the
+/// `.git` *file* a worktree gets in place of a directory. Roots are
+/// filtered separately because `ignore` applies `filter_entry` only from
+/// depth 1 down, which would leave `todo-by .git` walking it after all.
+///
+/// Returns `None` when no root survives, which `ignore` cannot build from.
 fn walk_builder(roots: &[PathBuf], overrides: Option<Override>) -> Option<WalkBuilder> {
-    let (first, rest) = roots.split_first()?;
-    let mut builder = WalkBuilder::new(first);
-    for root in rest {
+    let mut kept = roots.iter().filter(|root| !inside_git_dir(root));
+    let mut builder = WalkBuilder::new(kept.next()?);
+    for root in kept {
         builder.add(root);
     }
     builder
@@ -1501,9 +1513,9 @@ mod tests {
         ));
     }
 
-    /// Lays out a tree with one tracked file in a dotdir, one ignored
-    /// file, and two shapes of `.git`: a real directory at the root and
-    /// the plain file a worktree or submodule gets instead.
+    /// Every file the walk should reach carries a tag, so a findings set
+    /// and a file list can be compared directly. Two shapes of `.git`, per
+    /// `walk_builder`.
     fn walk_fixture(tag: &str) -> PathBuf {
         let root = unique_temp_dir(tag);
         let write = |rel: &str, body: &str| {
@@ -1511,91 +1523,161 @@ mod tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, body).unwrap();
         };
-        write("visible.txt", "plain\n");
+        write("visible.txt", "// todo-by 2998-01-01 plain file\n");
         write(
             ".github/workflows/ci.yml",
             "# todo-by 2998-01-01 unpin the action\n",
         );
-        write(".gitignore", "ignored.txt\n");
+        write(
+            ".gitignore",
+            "# todo-by 2998-01-01 drop this\nignored.txt\n",
+        );
+        write(
+            "worktree/kept.txt",
+            "// todo-by 2998-01-01 beside a .git file\n",
+        );
+        write("worktree/.git", "gitdir: ../.git/worktrees/wt\n");
         write("ignored.txt", "# todo-by 2998-01-01 never read\n");
-        // Commit messages, which discuss tags in the same words a tag
-        // uses. Reading them is what made `--hidden` report phantoms.
         write(
             ".git/COMMIT_EDITMSG",
             "fix: drop the todo-by 2998-01-01 tag\n",
         );
         write(".git/logs/HEAD", "0000 1111 commit: todo-by 2998-01-01\n");
-        write("worktree/.git", "gitdir: ../.git/worktrees/wt\n");
-        write("worktree/kept.txt", "plain\n");
         root
     }
 
-    fn walked(root: &Path) -> Vec<String> {
-        let (paths, had_error) = list_file_paths(std::slice::from_ref(&root.to_path_buf()), None);
-        assert!(!had_error, "walk reported an I/O error");
-        paths
-            .iter()
+    /// The four files above that are neither gitignored nor inside `.git`.
+    const WALK_FIXTURE_FILES: [&str; 4] = [
+        ".github/workflows/ci.yml",
+        ".gitignore",
+        "visible.txt",
+        "worktree/kept.txt",
+    ];
+
+    fn relative_to(root: &Path, paths: impl IntoIterator<Item = String>) -> Vec<String> {
+        let mut out: Vec<String> = paths
+            .into_iter()
             .map(|p| {
-                Path::new(p)
+                Path::new(&p)
                     .strip_prefix(root)
-                    .unwrap()
+                    .unwrap_or(Path::new(&p))
                     .to_string_lossy()
                     .replace('\\', "/")
             })
-            .collect()
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn walked(roots: &[PathBuf], root: &Path, overrides: Option<Override>) -> Vec<String> {
+        let (paths, had_error) = list_file_paths(roots, overrides);
+        assert!(!had_error, "walk reported an I/O error");
+        relative_to(root, paths)
+    }
+
+    fn scanned(roots: &[PathBuf], root: &Path, overrides: Option<Override>) -> Vec<String> {
+        let today = Date::parse_full("2999-01-01").unwrap();
+        let tags = vec!["todo-by".to_string()];
+        let (findings, had_error) = scan_roots(roots, overrides, today, None, &tags);
+        assert!(!had_error, "scan reported an I/O error");
+        relative_to(root, findings.into_iter().map(|f| f.file))
     }
 
     #[test]
     fn the_walk_covers_hidden_files_and_never_enters_a_git_dir() {
         let root = walk_fixture("walk");
-        let mut files = walked(&root);
-        files.sort();
-
-        // Hidden by name, tracked by git: the case the tool exists for.
+        let roots = vec![root.clone()];
         assert_eq!(
-            files,
-            vec![
-                ".github/workflows/ci.yml",
-                ".gitignore",
-                "visible.txt",
-                "worktree/kept.txt",
-            ],
+            walked(&roots, &root, None),
+            WALK_FIXTURE_FILES,
             "unexpected file set"
         );
-
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
-    fn scanning_agrees_with_the_file_list_it_advertises() {
+    fn scanning_reaches_exactly_the_files_that_files_advertises() {
         // `--files` exists to answer "what will be scanned", so the two
         // walks have to be the same walk. They were separate builders
-        // once, and a filter added to one would not reach the other.
+        // once, and a filter added to one would not reach the other. Every
+        // fixture file carries a tag, so the findings name every file the
+        // scan actually read.
         let root = walk_fixture("scan");
-        let today = Date::parse_full("2999-01-01").unwrap();
-        let tags = vec!["todo-by".to_string()];
-        let (findings, had_error) = scan_roots(
-            std::slice::from_ref(&root.to_path_buf()),
-            None,
-            today,
-            None,
-            &tags,
-        );
-        assert!(!had_error);
-
-        let mut hit_files: Vec<String> = findings
-            .iter()
-            .map(|f| {
-                Path::new(&f.file)
-                    .strip_prefix(&root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .replace('\\', "/")
-            })
-            .collect();
-        hit_files.sort();
-        assert_eq!(hit_files, vec![".github/workflows/ci.yml"]);
-
+        let roots = vec![root.clone()];
+        assert_eq!(scanned(&roots, &root, None), walked(&roots, &root, None));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_git_dir_named_as_a_root_is_dropped_rather_than_walked() {
+        // `ignore` applies filter_entry only from depth 1 down, so without
+        // the separate root filter this is how .git gets walked anyway.
+        let root = walk_fixture("git-root");
+        let git = root.join(".git");
+        assert!(walked(std::slice::from_ref(&git), &root, None).is_empty());
+        assert!(walked(&[git.join("logs")], &root, None).is_empty());
+        // Alongside a real root, the good root still produces its files
+        // and the .git one contributes nothing.
+        let both = vec![root.clone(), git];
+        assert_eq!(walked(&both, &root, None), WALK_FIXTURE_FILES);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn every_root_past_the_first_is_walked_too() {
+        // The roots after the first go through `WalkBuilder::add`, which a
+        // single-root test leaves entirely unexercised.
+        let root = walk_fixture("roots");
+        let roots = vec![root.join("worktree"), root.join(".github")];
+        assert_eq!(
+            walked(&roots, &root, None),
+            [".github/workflows/ci.yml", "worktree/kept.txt"]
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn config_excludes_reach_the_walker_and_apply_to_hidden_files() {
+        // Building the matcher is not the same as handing it to the
+        // walker, and a hidden path is the case the exclude globs never
+        // had to cover before.
+        let root = walk_fixture("excludes");
+        let roots = vec![root.clone()];
+        let overrides = build_overrides(&root, &[".github/**".to_string()])
+            .expect("valid pattern")
+            .expect("some overrides");
+        assert_eq!(
+            walked(&roots, &root, Some(overrides)),
+            [".gitignore", "visible.txt", "worktree/kept.txt"]
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn gitignore_applies_outside_a_repository() {
+        // `require_git(false)` is what makes the walker usable on an
+        // extracted tarball or a vendored tree. The fixture above has a
+        // real `.git`, so it would pass either way.
+        let root = unique_temp_dir("no-repo");
+        std::fs::write(root.join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(root.join("ignored.txt"), "x\n").unwrap();
+        std::fs::write(root.join("kept.txt"), "x\n").unwrap();
+        assert_eq!(
+            walked(std::slice::from_ref(&root), &root, None),
+            [".gitignore", "kept.txt"]
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_walk_with_no_usable_root_yields_nothing_instead_of_panicking() {
+        assert_eq!(list_file_paths(&[], None), (Vec::new(), false));
+    }
+
+    #[test]
+    fn hidden_is_absent_from_the_help_text() {
+        // The flag is accepted but deliberately undocumented. Re-adding
+        // the line would advertise a switch that changes nothing.
+        assert!(!USAGE.contains("--hidden"));
     }
 }
