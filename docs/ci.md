@@ -14,8 +14,8 @@ jobs:
 
       - name: Check overdue todo-by tags
         env:
-          TODOBY_VERSION: v0.2.1
-          TODOBY_SHA256: 2a2d0396a592a16ab211604fdb1e860586676a1a0785a9c89cbfb377fe9d9234
+          TODOBY_VERSION: v0.3.0
+          TODOBY_SHA256: 316ca0f4364c895dd24b702f1e8dfaa3109119dbb051ae07e206bbc8a9611314
         run: |
           ASSET="todo-by-cli-x86_64-unknown-linux-musl.tar.xz"
           curl --proto '=https' --tlsv1.2 -sSfL \
