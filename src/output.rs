@@ -1,6 +1,8 @@
 //! Renders findings to stdout in one of three formats: human-readable text,
 //! GitHub Actions workflow commands, or JSON Lines.
 
+use std::io::{self, Write};
+
 use crate::date::Date;
 use crate::scanner::{Finding, Kind};
 use crate::version::{missing_v_marker, unsupported_comparator};
@@ -27,22 +29,37 @@ const RED: &str = "\x1b[31m";
 const YELLOW: &str = "\x1b[33m";
 const RESET: &str = "\x1b[0m";
 
-/// Renders `findings` to stdout per `opts.format`. Text also prints a
-/// summary line to stderr when there's at least one finding; Json prints a
-/// trailing summary record to stdout instead (always, even with zero
-/// findings).
-pub fn render(findings: &[Finding], opts: &RenderOpts) {
+/// Renders `findings` to `w` per `opts.format`. Json appends a summary
+/// record to the stream (always, even with zero findings); Text's summary
+/// is a count on stderr and belongs to `summary_line`, not here.
+///
+/// Every write is fallible and every error is returned: `w` is a pipe as
+/// often as it is a terminal, and a reader that stops reading must end the
+/// output, not the process. See `crate::stdout`.
+pub fn render(w: &mut dyn Write, findings: &[Finding], opts: &RenderOpts) -> io::Result<()> {
     for f in findings {
-        println!("{}", render_finding(f, opts));
+        writeln!(w, "{}", render_finding(f, opts))?;
     }
     match opts.format {
-        Format::Text => {
-            if !findings.is_empty() {
-                eprintln!("{}", summary_text(findings));
-            }
-        }
-        Format::Github => {}
-        Format::Json => println!("{}", summary_json(findings)),
+        Format::Text | Format::Github => {}
+        Format::Json => writeln!(w, "{}", summary_json(findings))?,
+    }
+    Ok(())
+}
+
+/// The count Text writes to stderr once a run has something to count.
+/// None for the other two: Github says nothing, and Json carries its
+/// summary as a record inside the stream instead.
+///
+/// Returned rather than written, so that main writes it after stdout has
+/// been flushed. Under `2>&1` the two streams are one, and a buffered
+/// stdout would otherwise put the count above the findings it counts;
+/// making that ordering a matter of where the call sits, rather than of
+/// an internal flush, is what keeps it from silently coming undone.
+pub fn summary_line(findings: &[Finding], format: Format) -> Option<String> {
+    match format {
+        Format::Text if !findings.is_empty() => Some(summary_text(findings)),
+        _ => None,
     }
 }
 
@@ -830,6 +847,113 @@ mod tests {
             json.contains(r#""detail":"invalid issue reference""#),
             "{json}"
         );
+    }
+
+    /// A writer that accepts `limit` bytes and then fails the way a pipe
+    /// whose reader went away does. Byte-counted rather than
+    /// line-counted, and unrelated to any real pipe buffer, so the test
+    /// does not depend on how much a kernel happens to buffer.
+    struct ClosedAfter {
+        limit: usize,
+        written: Vec<u8>,
+        kind: io::ErrorKind,
+    }
+
+    impl ClosedAfter {
+        fn new(limit: usize, kind: io::ErrorKind) -> Self {
+            ClosedAfter {
+                limit,
+                written: Vec::new(),
+                kind,
+            }
+        }
+    }
+
+    impl Write for ClosedAfter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.written.len() >= self.limit {
+                return Err(io::Error::new(self.kind, "reader is gone"));
+            }
+            let take = buf.len().min(self.limit - self.written.len());
+            self.written.extend_from_slice(&buf[..take]);
+            Ok(take)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn render_writes_every_finding_then_the_summary() {
+        let mut buf = Vec::new();
+        render(
+            &mut buf,
+            &[overdue(), due_soon()],
+            &opts(Format::Json, false),
+        )
+        .unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert_eq!(out.lines().count(), 3, "{out}");
+        assert!(
+            out.lines().last().unwrap().contains(r#""type":"summary""#),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn only_text_has_a_stderr_summary() {
+        let findings = vec![overdue(), due_soon()];
+        assert_eq!(
+            summary_line(&findings, Format::Text).as_deref(),
+            Some("1 finding, 1 warning")
+        );
+        // Nothing to count, nothing to say.
+        assert_eq!(summary_line(&[], Format::Text), None);
+        // Json carries its count in the stream, Github reports none.
+        assert_eq!(summary_line(&findings, Format::Json), None);
+        assert_eq!(summary_line(&findings, Format::Github), None);
+    }
+
+    #[test]
+    fn render_reports_a_closed_reader_instead_of_panicking() {
+        // The bug this guards: `todo-by | head -1` used to panic inside
+        // `println!` and exit 101, a code the CLI never documented.
+        let mut w = ClosedAfter::new(10, io::ErrorKind::BrokenPipe);
+        let findings = vec![overdue(), due_soon(), invalid()];
+        let err = render(&mut w, &findings, &opts(Format::Text, false)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+        // Stops at the break rather than carrying on into a stream nobody
+        // is reading.
+        assert_eq!(w.written.len(), 10);
+    }
+
+    #[test]
+    fn render_reports_a_real_write_failure_too() {
+        // Same path, different verdict in main: this one is an error, and
+        // telling them apart is `stdout::write`'s job, not `render`'s.
+        let mut w = ClosedAfter::new(0, io::ErrorKind::StorageFull);
+        let err = render(&mut w, &[overdue()], &opts(Format::Json, false)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::StorageFull);
+    }
+
+    #[test]
+    fn json_summary_is_written_even_with_no_findings() {
+        let mut buf = Vec::new();
+        render(&mut buf, &[], &opts(Format::Json, false)).unwrap();
+        assert_eq!(
+            String::from_utf8(buf).unwrap().trim(),
+            r#"{"type":"summary","findings":0,"warnings":0}"#
+        );
+    }
+
+    #[test]
+    fn github_format_writes_no_summary() {
+        let mut buf = Vec::new();
+        render(&mut buf, &[overdue()], &opts(Format::Github, false)).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert_eq!(out.lines().count(), 1);
+        assert!(out.starts_with("::error "), "{out}");
     }
 
     #[test]
