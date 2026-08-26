@@ -3,8 +3,8 @@ name = "todo-by-cli"
 version = "0.3.0"
 edition = "2021"
 # Floor set by the `ignore` dependency, which declares rust-version 1.88 from
-# 0.4.31 on; enforced by the msrv job in CI. Keep in sync with ci.yml and
-# clippy.toml.
+# 0.4.31 on. Single source of truth: the msrv job in CI reads this field, and
+# so does clippy.
 rust-version = "1.88"
 description = "Flag todo-by tags whose deadline has passed or whose target version has shipped, across any file type"
 license = "MIT"
@@ -15,6 +15,11 @@ readme = "README.md"
 include = ["/src/**", "/Cargo.toml", "/README.md", "/LICENSE"]
 keywords = ["todo", "deadline", "linter", "ci", "comments"]
 categories = ["command-line-utilities", "development-tools"]
+# MSRV-aware resolution (cargo 1.84+): `cargo update` and `cargo add` prefer
+# versions whose own rust-version fits ours, so the committed lockfile stays
+# buildable on the MSRV toolchain. Dependabot resolves through the crates.io
+# API and ignores this, so the msrv job is what catches its bumps.
+resolver = "3"
 
 [[bin]]
 name = "todo-by"
