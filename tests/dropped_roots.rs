@@ -49,12 +49,21 @@ fn todo_by_with_stdin(args: &[&Path], dir: &Path, input: &str) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn todo-by");
-    child
+    // A run that never reads stdin (`--files`) may exit and close the
+    // pipe before the write lands; that early EPIPE is part of the
+    // behavior under test, not a test failure.
+    if let Err(err) = child
         .stdin
         .take()
         .expect("piped stdin")
         .write_all(input.as_bytes())
-        .expect("write stdin");
+    {
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::BrokenPipe,
+            "write stdin: {err}"
+        );
+    }
     child.wait_with_output().expect("wait for todo-by")
 }
 
