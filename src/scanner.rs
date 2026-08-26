@@ -927,6 +927,20 @@ mod tests {
         scan_bytes("bin", binary, &c, &mut findings);
         assert!(findings.is_empty());
 
+        // A NUL past the window is content, not a verdict: the window is a
+        // fixed 8 KiB, never "anywhere in the bytes". The NUL sits on the
+        // first byte outside it, and stdin is where this has to be pinned,
+        // being the one caller that hands over more than the window at
+        // once. `scan_file` cannot: it only ever holds the prefix when it
+        // decides.
+        let mut findings = Vec::new();
+        let mut content = b"// todo-by 2998-01-01 before a distant NUL\n".to_vec();
+        content.resize(BINARY_PREFIX, b'x');
+        content.push(0);
+        scan_bytes("late-nul", &content, &c, &mut findings);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].line, 1);
+
         // Invalid UTF-8 elsewhere must not abort the scan of a valid tag.
         let mut findings = Vec::new();
         let mut content = b"\xff\xfe garbage\n".to_vec();
