@@ -1711,17 +1711,30 @@ mod tests {
             "// todo-by 2998-01-01 plain file\n",
         );
         write(".jj/repo/store/op_heads", "op: todo-by 2998-01-01 stored\n");
+        // Reached by the walk, dropped by the scan, which is the only
+        // difference the two modes are allowed to have. Without it the
+        // two sets match for want of anything to disagree about.
+        write(
+            WALK_FIXTURE_BINARY,
+            "\0// todo-by 2998-01-01 inside a binary\n",
+        );
         root
     }
 
     /// The fixture files left once the gitignored ones and everything
-    /// named as, or held by, a metadata directory are gone.
-    const WALK_FIXTURE_FILES: [&str; 4] = [
+    /// named as, or held by, a metadata directory are gone: what `--files`
+    /// lists.
+    const WALK_FIXTURE_FILES: [&str; 5] = [
         ".github/workflows/ci.yml",
         ".gitignore",
+        "binary.dat",
         "visible.txt",
         "worktree/kept.txt",
     ];
+
+    /// The one member of [`WALK_FIXTURE_FILES`] the scan drops after the
+    /// walk has already yielded it.
+    const WALK_FIXTURE_BINARY: &str = "binary.dat";
 
     fn relative_to(root: &Path, paths: impl IntoIterator<Item = String>) -> Vec<String> {
         let mut out: Vec<String> = paths
@@ -1773,7 +1786,19 @@ mod tests {
         // scan actually read.
         let root = walk_fixture("scan");
         let roots = vec![root.clone()];
-        assert_eq!(scanned(&roots, &root, None), walked(&roots, &root, None));
+        let listed = walked(&roots, &root, None);
+        assert!(
+            listed.iter().any(|p| p == WALK_FIXTURE_BINARY),
+            "the fixture must reach the walk for the divergence to mean anything: {listed:?}"
+        );
+        // Advertised minus the binary content `--files` cannot know about
+        // without reading, which is the one divergence by design. Anything
+        // else diverging is the two walks drifting apart.
+        let expected: Vec<String> = listed
+            .into_iter()
+            .filter(|p| p != WALK_FIXTURE_BINARY)
+            .collect();
+        assert_eq!(scanned(&roots, &root, None), expected);
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -1924,7 +1949,12 @@ mod tests {
             .expect("some overrides");
         assert_eq!(
             walked(&roots, &root, Some(overrides)),
-            [".gitignore", "visible.txt", "worktree/kept.txt"]
+            [
+                ".gitignore",
+                "binary.dat",
+                "visible.txt",
+                "worktree/kept.txt"
+            ]
         );
         std::fs::remove_dir_all(&root).ok();
     }
