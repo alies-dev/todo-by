@@ -62,7 +62,9 @@ fn a_root_and_its_own_subdirectory_are_each_covered_once_by_the_deepest_root() {
         "stdout: {forward_out}"
     );
     assert!(
-        forward_out.lines().any(|l| l == "src/lib.rs"),
+        forward_out
+            .lines()
+            .any(|l| l.replace('\\', "/") == "src/lib.rs"),
         "the file under src must carry src's spelling, the deepest root \
          that covers it, not the ancestor's: {forward_out}"
     );
