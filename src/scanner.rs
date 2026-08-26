@@ -1,3 +1,5 @@
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
 use crate::date::{deadline, Date};
@@ -480,19 +482,83 @@ fn clean_message(rest: &str) -> String {
     msg.trim().to_string()
 }
 
+/// Leading bytes a file is judged by. Same window whatever the source, so
+/// a file and the identical bytes piped in on stdin classify alike.
+const BINARY_PREFIX: usize = 8 * 1024;
+
+/// Whether content reads as binary: a NUL byte within the first
+/// [`BINARY_PREFIX`] bytes. Takes the whole content rather than a
+/// pre-trimmed prefix, so a caller holding the entire file (stdin) and one
+/// holding only the prefix ([`scan_file`]) share the same rule.
+fn is_binary(content: &[u8]) -> bool {
+    content.iter().take(BINARY_PREFIX).any(|&b| b == 0)
+}
+
+/// Reads `source` far enough to classify it, and on to the end only once
+/// it reads as text. `None` is binary, and says more than "no findings":
+/// nothing past the prefix was ever requested.
+///
+/// Generic over `Read` rather than written straight into [`scan_file`] so
+/// that claim can be tested. A test that can only see findings cannot tell
+/// this apart from reading the whole file and discarding it, which is
+/// exactly what this replaces. The specialized `read_to_end` a `File`
+/// carries survives the indirection, since `Read for &mut R` forwards to
+/// it.
+fn read_if_text<R: Read>(source: &mut R) -> std::io::Result<Option<Vec<u8>>> {
+    let mut content = Vec::with_capacity(BINARY_PREFIX);
+    source
+        .by_ref()
+        .take(BINARY_PREFIX as u64)
+        .read_to_end(&mut content)?;
+    if is_binary(&content) {
+        return Ok(None);
+    }
+    // A prefix that came back short means `read_to_end` saw the source
+    // signal EOF, so there is nothing more to ask it for. Bytes appended
+    // afterwards are not picked up, which was equally true of the
+    // whole-file read this replaces: neither takes a snapshot.
+    //
+    // Only a source that fills the prefix pays for the second read, so the
+    // common case (source files, all smaller than this) does not cost the
+    // extra one it looks like it should: nothing here asks for a length,
+    // where `fs::read` stats for its capacity hint. No size hint is
+    // computed here either, because `File::read_to_end` computes its own
+    // once this line is reached, and doing it twice is what the first
+    // draft of this got wrong.
+    if content.len() == BINARY_PREFIX {
+        source.read_to_end(&mut content)?;
+    }
+    Ok(Some(content))
+}
+
+/// Reads `path` and scans it, never reading a binary file past the bytes
+/// that classify it.
+///
+/// Peak memory tracks the largest text file rather than the largest file,
+/// and that distinction is the whole point: the walker runs one of these
+/// per worker, and a tool cache full of multi-gigabyte binaries is exactly
+/// the tree where the old read-then-decide order cost the most.
 pub fn scan_file(path: &Path, ctx: &ScanCtx, findings: &mut Vec<Finding>) -> std::io::Result<()> {
-    let content = std::fs::read(path)?;
-    scan_bytes(&path.display().to_string(), &content, ctx, findings);
+    let mut file = File::open(path)?;
+    if let Some(content) = read_if_text(&mut file)? {
+        scan_lossy(&path.display().to_string(), &content, ctx, findings);
+    }
     Ok(())
 }
 
-/// Scans raw bytes (file contents or stdin): skips binary content (NUL byte
-/// in the first 8 KiB) and decodes the rest lossily, so invalid UTF-8 never
-/// aborts a scan.
+/// Scans raw bytes already held in memory (stdin): skips binary content and
+/// decodes the rest lossily. [`scan_file`] deliberately does not route
+/// through here, since arriving with the bytes in hand is the cost it
+/// exists to avoid; it applies [`is_binary`] itself, to the prefix alone.
 pub fn scan_bytes(file_label: &str, content: &[u8], ctx: &ScanCtx, findings: &mut Vec<Finding>) {
-    if content.iter().take(8192).any(|&b| b == 0) {
+    if is_binary(content) {
         return;
     }
+    scan_lossy(file_label, content, ctx, findings);
+}
+
+/// Decodes lossily, so invalid UTF-8 never aborts a scan, and scans.
+fn scan_lossy(file_label: &str, content: &[u8], ctx: &ScanCtx, findings: &mut Vec<Finding>) {
     let text = String::from_utf8_lossy(content);
     scan_text(file_label, &text, ctx, findings);
 }
@@ -622,6 +688,7 @@ fn classify(written: &str, ctx: &ScanCtx) -> Option<Kind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn tags(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
@@ -862,6 +929,20 @@ mod tests {
         scan_bytes("bin", binary, &c, &mut findings);
         assert!(findings.is_empty());
 
+        // A NUL past the window is content, not a verdict: the window is a
+        // fixed 8 KiB, never "anywhere in the bytes". The NUL sits on the
+        // first byte outside it, and stdin is where this has to be pinned,
+        // being the one caller that hands over more than the window at
+        // once. `scan_file` cannot: it only ever holds the prefix when it
+        // decides.
+        let mut findings = Vec::new();
+        let mut content = b"// todo-by 2998-01-01 before a distant NUL\n".to_vec();
+        content.resize(BINARY_PREFIX, b'x');
+        content.push(0);
+        scan_bytes("late-nul", &content, &c, &mut findings);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].line, 1);
+
         // Invalid UTF-8 elsewhere must not abort the scan of a valid tag.
         let mut findings = Vec::new();
         let mut content = b"\xff\xfe garbage\n".to_vec();
@@ -869,6 +950,150 @@ mod tests {
         scan_bytes("mixed", &content, &c, &mut findings);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].line, 2);
+    }
+
+    /// A directory for one test's fixture files, named after the test so
+    /// concurrent tests never collide and after the process so a leftover
+    /// from an earlier run is never mistaken for this one's.
+    fn fixture_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("todo-by-scanner-{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        dir
+    }
+
+    fn scan_fixture(path: &Path, c: &ScanCtx) -> Vec<Finding> {
+        let mut findings = Vec::new();
+        scan_file(path, c, &mut findings).expect("scan fixture");
+        findings
+    }
+
+    /// A source that refuses to give up anything past the detection
+    /// prefix, so a reader that asks gets an error rather than the bytes.
+    struct PrefixOnly<'a> {
+        content: &'a [u8],
+        pos: usize,
+    }
+
+    impl Read for PrefixOnly<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.pos >= BINARY_PREFIX {
+                return Err(std::io::Error::other("read past the detection prefix"));
+            }
+            let n = buf.len().min(self.content.len() - self.pos);
+            buf[..n].copy_from_slice(&self.content[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn a_binary_source_is_never_read_past_the_prefix() {
+        // The claim this change exists to make, and the one findings alone
+        // cannot check: reporting nothing is also what reading the whole
+        // file and throwing it away did. Here reading on is an error, so
+        // restoring that order fails rather than passing quietly.
+        let mut content = vec![0u8; 16];
+        content.resize(BINARY_PREFIX * 4, b'x');
+        let mut source = PrefixOnly {
+            content: &content,
+            pos: 0,
+        };
+        assert!(read_if_text(&mut source).expect("classify").is_none());
+        assert_eq!(source.pos, BINARY_PREFIX);
+    }
+
+    #[test]
+    fn scan_file_decides_binary_from_the_prefix_alone() {
+        let todo_by_tags = todo_by();
+        let today = Date::new(2999, 1, 1).unwrap();
+        let c = ctx(today, None, &todo_by_tags);
+        let dir = fixture_dir("binary");
+        let tag = b"// todo-by 2998-01-01 behind the NUL\n";
+
+        // A NUL anywhere the prefix reaches makes the file binary, so the
+        // tag behind it is never reported. The last byte the prefix reaches
+        // is the one an off-by-one drops, so it gets its own fixture.
+        for (name, nul_at) in [("early-nul", 0), ("last-nul", BINARY_PREFIX - 1)] {
+            let path = dir.join(name);
+            let mut content = vec![b'x'; nul_at];
+            content.push(0);
+            content.extend_from_slice(tag);
+            std::fs::write(&path, &content).expect("write fixture");
+            assert!(scan_fixture(&path, &c).is_empty(), "{name}");
+        }
+
+        // The first byte the prefix does not reach: text, so the whole file
+        // is read and the tag stands. The same verdict the old
+        // read-everything-first order gave, since the window and the rule
+        // did not move; reading less must not change what counts as binary.
+        let late = dir.join("late-nul");
+        let mut content = tag.to_vec();
+        content.resize(BINARY_PREFIX, b'x');
+        content.push(0);
+        std::fs::write(&late, &content).expect("write fixture");
+        let findings = scan_fixture(&late, &c);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].line, 1);
+    }
+
+    #[test]
+    fn scan_file_joins_its_two_reads_without_losing_bytes() {
+        let todo_by_tags = todo_by();
+        let today = Date::new(2999, 1, 1).unwrap();
+        let c = ctx(today, None, &todo_by_tags);
+        let dir = fixture_dir("seam");
+
+        // A tag whose message straddles the boundary between the prefix
+        // read and the read of the rest. The seam is the one thing
+        // splitting the read introduced, so a tag lying across it is what
+        // proves the second read appends rather than restarting or
+        // dropping bytes. The character on the seam is multi-byte on
+        // purpose: decoding the two reads separately instead of the joined
+        // buffer would leave replacement characters behind, and an
+        // ASCII-only fixture would not notice.
+        let straddle = dir.join("straddle");
+        let mut content = "x".repeat(BINARY_PREFIX - 35);
+        content.push('\n');
+        let seam_char = '\u{2192}';
+        content.push_str("// todo-by 2998-01-01 across the ");
+        let seam_char_at = content.len();
+        content.push(seam_char);
+        assert!(
+            seam_char_at < BINARY_PREFIX && seam_char_at + seam_char.len_utf8() > BINARY_PREFIX,
+            "fixture must place the character across the seam, not beside it"
+        );
+        content.push_str(" seam\n");
+        std::fs::write(&straddle, &content).expect("write fixture");
+        let findings = scan_fixture(&straddle, &c);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].line, 2);
+        assert_eq!(findings[0].message, format!("across the {seam_char} seam"));
+
+        // A file exactly the prefix length, where the second read has
+        // nothing to add and must not be mistaken for a truncated file.
+        let exact = dir.join("exact");
+        let mut content = String::from("// todo-by 2998-01-01 exactly the prefix\n");
+        content.push_str(&"x".repeat(BINARY_PREFIX - content.len()));
+        assert_eq!(content.len(), BINARY_PREFIX);
+        std::fs::write(&exact, &content).expect("write fixture");
+        assert_eq!(scan_fixture(&exact, &c).len(), 1);
+
+        // An empty file reads as text and reports nothing, rather than
+        // erroring on the read that finds no prefix at all.
+        let empty = dir.join("empty");
+        std::fs::write(&empty, b"").expect("write fixture");
+        assert!(scan_fixture(&empty, &c).is_empty());
+    }
+
+    #[test]
+    fn scan_file_surfaces_an_unopenable_path_as_an_error() {
+        let todo_by_tags = todo_by();
+        let today = Date::new(2999, 1, 1).unwrap();
+        let c = ctx(today, None, &todo_by_tags);
+        let missing = fixture_dir("missing").join("not-here");
+        let mut findings = Vec::new();
+        assert!(scan_file(&missing, &c, &mut findings).is_err());
     }
 
     #[test]
