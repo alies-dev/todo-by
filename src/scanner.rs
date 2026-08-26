@@ -519,10 +519,12 @@ fn read_if_text<R: Read>(source: &mut R) -> std::io::Result<Option<Vec<u8>>> {
     // whole-file read this replaces: neither takes a snapshot.
     //
     // Only a source that fills the prefix pays for the second read, so the
-    // common case (source files, all smaller than this) costs one syscall
-    // less than `fs::read` did rather than one more: nothing here asks for
-    // a length, and `File::read_to_end` sizes the buffer from one when it
-    // is reached, which is why no size hint is computed here.
+    // common case (source files, all smaller than this) does not cost the
+    // extra one it looks like it should: nothing here asks for a length,
+    // where `fs::read` stats for its capacity hint. No size hint is
+    // computed here either, because `File::read_to_end` computes its own
+    // once this line is reached, and doing it twice is what the first
+    // draft of this got wrong.
     if content.len() == BINARY_PREFIX {
         source.read_to_end(&mut content)?;
     }
@@ -1053,11 +1055,12 @@ mod tests {
         let straddle = dir.join("straddle");
         let mut content = "x".repeat(BINARY_PREFIX - 35);
         content.push('\n');
+        let seam_char = '\u{2192}';
         content.push_str("// todo-by 2998-01-01 across the ");
         let seam_char_at = content.len();
-        content.push('\u{2192}');
+        content.push(seam_char);
         assert!(
-            seam_char_at < BINARY_PREFIX && seam_char_at + '\u{2192}'.len_utf8() > BINARY_PREFIX,
+            seam_char_at < BINARY_PREFIX && seam_char_at + seam_char.len_utf8() > BINARY_PREFIX,
             "fixture must place the character across the seam, not beside it"
         );
         content.push_str(" seam\n");
@@ -1065,7 +1068,7 @@ mod tests {
         let findings = scan_fixture(&straddle, &c);
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].line, 2);
-        assert_eq!(findings[0].message, "across the \u{2192} seam");
+        assert_eq!(findings[0].message, format!("across the {seam_char} seam"));
 
         // A file exactly the prefix length, where the second read has
         // nothing to add and must not be mistaken for a truncated file.
