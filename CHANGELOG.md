@@ -7,9 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-26
+
 ### Added
 
-- Issue triggers: a tag can fire when a GitHub issue or pull request closes. Write `#123` for the repository the git remote points at, or a full issue or pull request URL for any other repository or host. `owner/repo#123` is not supported, since the URL already says the same thing and can also name a host. Any state other than open fires, `merged` included; the close reason is never requested and never inspected.
+- Issue triggers: a tag can fire when a GitHub issue or pull request closes. Write `#123` for the repository the git remote points at, or a full issue or pull request URL for any other repository or host. `owner/repo#123` is rejected rather than accepted, since the URL already says the same thing and can also name a host. Any state other than open fires, `merged` included; the close reason is never requested and never inspected.
 - The issue spellings other tools accept (`owner/repo#123` and `GH-123`, which GitHub autolinks, and `repo#123`, which phpstan-todo-by takes) are reported rather than ignored, each naming the accepted spelling; the cross repository form quotes the exact URL to write instead. A token carrying neither marker (a `#` with a digit behind it, or the `GH-` form) stays prose, so a project matching on `todo` does not have every undated TODO reported.
 - Issue URLs may carry a fragment or a query, so a comment permalink pasted straight from GitHub (`.../issues/123#issuecomment-456`) names issue 123 rather than being ignored as prose.
 - `--online` (and the `online` config key, with `--offline` to override it) gates every network call. Without it, issue tags are left unchecked and reported once on stderr, with no findings and no change to the exit code. The check runs only when the scan actually found an issue tag, so a tree of date tags stays hermetic.
@@ -23,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Flags that take no value now reject one instead of discarding it. `--exit-zero=false` parsed as the flag plus an ignored `"false"` and then did the opposite of what was written; the same held for `--hidden`, `--files` and `--dump-config`.
 - A trigger written flush against an HTML comment closer, with no space before the `-->`, left a stray `->` at the head of the finding's message. The closer is now stripped from the message the way it was already kept out of the trigger span.
 
 ## [0.3.0] - 2026-07-26
@@ -76,7 +79,8 @@ Initial release.
 - Exit codes: 0 clean, 1 findings, 2 error.
 - `--today` to override the clock for testing and dry runs.
 
-[Unreleased]: https://github.com/alies-dev/todo-by/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/alies-dev/todo-by/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/alies-dev/todo-by/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/alies-dev/todo-by/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/alies-dev/todo-by/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/alies-dev/todo-by/compare/v0.1.0...v0.2.0
