@@ -756,11 +756,15 @@ tags = [\"todo-by\"]
 
     #[test]
     fn a_boolean_key_rejects_everything_that_is_not_one() {
+        // `truthy` exercises the trailing-content path, since it starts
+        // with `true`; `yes` and `on` exercise the "not a boolean at all"
+        // path, and are what people write when guessing the grammar.
         for text in [
             "online = 1",
             "online = \"true\"",
             "online = truthy",
-            "online = tru",
+            "online = yes",
+            "online = on",
         ] {
             assert!(parse(text, "t").is_err(), "expected {text:?} rejected");
         }
