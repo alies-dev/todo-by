@@ -70,6 +70,7 @@ todo-by --dump-config           # print effective config, then exit
 ```
 
 Exit codes: `0` no findings (warnings alone still exit 0), `1` findings, `2` usage, config, or I/O error.
+A reader that stops reading is not one of them: `todo-by | head -4` ends the output where `head` stopped and reports on the scan it ran, so `set -o pipefail` still fails a job whose tree has overdue tags.
 
 ## Triggers
 

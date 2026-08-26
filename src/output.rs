@@ -29,10 +29,9 @@ const RED: &str = "\x1b[31m";
 const YELLOW: &str = "\x1b[33m";
 const RESET: &str = "\x1b[0m";
 
-/// Renders `findings` to `w` per `opts.format`. Text also prints a
-/// summary line to stderr when there's at least one finding; Json prints a
-/// trailing summary record to `w` instead (always, even with zero
-/// findings).
+/// Renders `findings` to `w` per `opts.format`. Json appends a summary
+/// record to the stream (always, even with zero findings); Text's summary
+/// is a count on stderr and belongs to `summary_line`, not here.
 ///
 /// Every write is fallible and every error is returned: `w` is a pipe as
 /// often as it is a terminal, and a reader that stops reading must end the
@@ -42,25 +41,26 @@ pub fn render(w: &mut dyn Write, findings: &[Finding], opts: &RenderOpts) -> io:
         writeln!(w, "{}", render_finding(f, opts))?;
     }
     match opts.format {
-        Format::Text => {
-            if !findings.is_empty() {
-                // Flushed before the summary reaches stderr, because under
-                // `2>&1` both land in the same stream and a buffered
-                // stdout would otherwise put the summary above the
-                // findings it counts.
-                w.flush()?;
-                // Best effort, for the reason `note!` is: `2>&1 | head`
-                // closes stderr the same way it closes stdout, and a
-                // dropped summary line beats a panic on the way out. It
-                // does not go through `note!` because it is a count, not
-                // a diagnostic, and carries no `todo-by: ` prefix.
-                let _ = writeln!(io::stderr(), "{}", summary_text(findings));
-            }
-        }
-        Format::Github => {}
+        Format::Text | Format::Github => {}
         Format::Json => writeln!(w, "{}", summary_json(findings))?,
     }
     Ok(())
+}
+
+/// The count Text writes to stderr once a run has something to count.
+/// None for the other two: Github says nothing, and Json carries its
+/// summary as a record inside the stream instead.
+///
+/// Returned rather than written, so that main writes it after stdout has
+/// been flushed. Under `2>&1` the two streams are one, and a buffered
+/// stdout would otherwise put the count above the findings it counts;
+/// making that ordering a matter of where the call sits, rather than of
+/// an internal flush, is what keeps it from silently coming undone.
+pub fn summary_line(findings: &[Finding], format: Format) -> Option<String> {
+    match format {
+        Format::Text if !findings.is_empty() => Some(summary_text(findings)),
+        _ => None,
+    }
 }
 
 fn render_finding(f: &Finding, opts: &RenderOpts) -> String {
@@ -857,7 +857,6 @@ mod tests {
         limit: usize,
         written: Vec<u8>,
         kind: io::ErrorKind,
-        flushes: usize,
     }
 
     impl ClosedAfter {
@@ -866,14 +865,7 @@ mod tests {
                 limit,
                 written: Vec::new(),
                 kind,
-                flushes: 0,
             }
-        }
-
-        /// Accepts everything, so the same writer doubles as a plain sink
-        /// that counts flushes.
-        fn open() -> Self {
-            ClosedAfter::new(usize::MAX, io::ErrorKind::BrokenPipe)
         }
     }
 
@@ -888,7 +880,6 @@ mod tests {
         }
 
         fn flush(&mut self) -> io::Result<()> {
-            self.flushes += 1;
             Ok(())
         }
     }
@@ -911,18 +902,17 @@ mod tests {
     }
 
     #[test]
-    fn text_flushes_stdout_before_the_stderr_summary() {
-        // Under `2>&1` the two streams merge, so a buffered stdout that
-        // was not flushed here would print the count above the findings
-        // it counts.
-        let mut w = ClosedAfter::open();
-        render(&mut w, &[overdue()], &opts(Format::Text, false)).unwrap();
-        assert_eq!(w.flushes, 1);
-
-        // Nothing to summarize, nothing to order: no flush is forced.
-        let mut w = ClosedAfter::open();
-        render(&mut w, &[], &opts(Format::Text, false)).unwrap();
-        assert_eq!(w.flushes, 0);
+    fn only_text_has_a_stderr_summary() {
+        let findings = vec![overdue(), due_soon()];
+        assert_eq!(
+            summary_line(&findings, Format::Text).as_deref(),
+            Some("1 finding, 1 warning")
+        );
+        // Nothing to count, nothing to say.
+        assert_eq!(summary_line(&[], Format::Text), None);
+        // Json carries its count in the stream, Github reports none.
+        assert_eq!(summary_line(&findings, Format::Json), None);
+        assert_eq!(summary_line(&findings, Format::Github), None);
     }
 
     #[test]

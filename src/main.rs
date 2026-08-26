@@ -759,7 +759,7 @@ fn list_file_paths(roots: &[PathBuf], overrides: Option<Override>) -> (Vec<Strin
 /// `stdout::write` for why the second one is not an error.
 fn write_stdout(f: impl FnOnce(&mut dyn Write) -> io::Result<()>) -> Result<(), ExitCode> {
     stdout::write(f).map_err(|err| {
-        note!("{err}");
+        note!("stdout: {err}");
         ExitCode::from(2)
     })
 }
@@ -1035,6 +1035,15 @@ fn main() -> ExitCode {
     };
     if let Err(code) = write_stdout(|w| output::render(w, &findings, &opts)) {
         return code;
+    }
+    // After the stdout write, never inside it: `2>&1` merges the two
+    // streams, and the count has to land under the findings it counts.
+    // Unprefixed, so it does not go through `note!`, but dropped on a
+    // write failure for the same reason `note!` drops one. A reader that
+    // stopped reading stdout has usually left stderr open, so the count
+    // still arrives even when the listing was cut short.
+    if let Some(summary) = output::summary_line(&findings, format) {
+        let _ = writeln!(io::stderr(), "{summary}");
     }
 
     if had_error {
