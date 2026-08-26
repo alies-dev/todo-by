@@ -1,7 +1,8 @@
-// The whole point of `crate::stdout` is that it is the only way out. A
-// `println!` anywhere else reintroduces the panic it exists to remove, so
-// the compiler, not a reviewer, is what keeps them from coming back.
-#![deny(clippy::print_stdout)]
+// The whole point of `crate::stdout` and `note!` is that they are the only
+// ways out. A `println!` or `eprintln!` anywhere else reintroduces the
+// panic they exist to remove, so the compiler, not a reviewer, is what
+// keeps them from coming back.
+#![deny(clippy::print_stdout, clippy::print_stderr)]
 
 use std::ffi::OsStr;
 use std::io::{self, IsTerminal, Read, Write};
@@ -27,6 +28,24 @@ use date::Date;
 use output::{Format, RenderOpts};
 use scanner::{Finding, ScanCtx};
 use version::Version;
+
+/// Writes one diagnostic to stderr.
+///
+/// Everything the tool says outside its findings goes through here, for
+/// the same reason `crate::stdout` exists: `2>&1 | head` closes stderr
+/// exactly the way it closes stdout, and the `eprintln!` this replaces
+/// answers a closed stream by panicking. A diagnostic nobody can read is
+/// worth dropping; it is not worth a crash report. The `todo-by: ` prefix
+/// lives here too, so no call site repeats it.
+macro_rules! note {
+    ($($arg:tt)*) => {
+        $crate::note(format_args!($($arg)*))
+    };
+}
+
+fn note(message: std::fmt::Arguments) {
+    let _ = writeln!(io::stderr(), "todo-by: {message}");
+}
 
 const USAGE: &str = "\
 todo-by: flag todo-by tags whose deadline has passed, whose version has shipped,
@@ -688,7 +707,7 @@ fn scan_roots(
                         };
                         let mut local = Vec::new();
                         if let Err(err) = scanner::scan_file(entry.path(), &ctx, &mut local) {
-                            eprintln!("todo-by: {}: {err}", entry.path().display());
+                            note!("{}: {err}", entry.path().display());
                             io_error.store(true, Ordering::Relaxed);
                         }
                         for finding in local {
@@ -697,7 +716,7 @@ fn scan_roots(
                     }
                 }
                 Err(err) => {
-                    eprintln!("todo-by: {err}");
+                    note!("{err}");
                     io_error.store(true, Ordering::Relaxed);
                 }
             }
@@ -725,7 +744,7 @@ fn list_file_paths(roots: &[PathBuf], overrides: Option<Override>) -> (Vec<Strin
                 }
             }
             Err(err) => {
-                eprintln!("todo-by: {err}");
+                note!("{err}");
                 had_error = true;
             }
         }
@@ -740,7 +759,7 @@ fn list_file_paths(roots: &[PathBuf], overrides: Option<Override>) -> (Vec<Strin
 /// `stdout::write` for why the second one is not an error.
 fn write_stdout(f: impl FnOnce(&mut dyn Write) -> io::Result<()>) -> Result<(), ExitCode> {
     stdout::write(f).map_err(|err| {
-        eprintln!("todo-by: {err}");
+        note!("{err}");
         ExitCode::from(2)
     })
 }
@@ -762,7 +781,7 @@ fn main() -> ExitCode {
     let cli = match parse_args(std::env::args().skip(1)) {
         Ok(cli) => cli,
         Err(err) => {
-            eprintln!("todo-by: {err}\n\n{USAGE}");
+            note!("{err}\n\n{USAGE}");
             return ExitCode::from(2);
         }
     };
@@ -771,7 +790,7 @@ fn main() -> ExitCode {
     // not buried under findings, and on stderr so it never lands in
     // --files output or a JSON stream.
     for notice in &cli.deprecated {
-        eprintln!("todo-by: {notice}");
+        note!("{notice}");
     }
 
     let format = match resolve_format(
@@ -781,7 +800,7 @@ fn main() -> ExitCode {
     ) {
         Ok(f) => f,
         Err(err) => {
-            eprintln!("todo-by: {err}");
+            note!("{err}");
             return ExitCode::from(2);
         }
     };
@@ -790,7 +809,7 @@ fn main() -> ExitCode {
         Some(s) => match Date::parse_full(s) {
             Some(d) => d,
             None => {
-                eprintln!("todo-by: --today must be a valid YYYY-MM-DD date, got {s:?}");
+                note!("--today must be a valid YYYY-MM-DD date, got {s:?}");
                 return ExitCode::from(2);
             }
         },
@@ -800,14 +819,14 @@ fn main() -> ExitCode {
     let start_dir = match std::env::current_dir() {
         Ok(d) => d,
         Err(err) => {
-            eprintln!("todo-by: {err}");
+            note!("{err}");
             return ExitCode::from(2);
         }
     };
     let cfg = match config::load(&start_dir) {
         Ok(c) => c,
         Err(err) => {
-            eprintln!("todo-by: {err}");
+            note!("{err}");
             return ExitCode::from(2);
         }
     };
@@ -819,7 +838,7 @@ fn main() -> ExitCode {
     ) {
         Ok(w) => w,
         Err(err) => {
-            eprintln!("todo-by: {err}");
+            note!("{err}");
             return ExitCode::from(2);
         }
     };
@@ -853,7 +872,7 @@ fn main() -> ExitCode {
     let overrides = match build_overrides(&start_dir, &cfg.exclude) {
         Ok(ov) => ov,
         Err(err) => {
-            eprintln!("todo-by: {err}");
+            note!("{err}");
             return ExitCode::from(2);
         }
     };
@@ -869,12 +888,12 @@ fn main() -> ExitCode {
         if p.exists() {
             fs_paths.push(p.clone());
         } else {
-            eprintln!("todo-by: path does not exist: {}", p.display());
+            note!("path does not exist: {}", p.display());
             had_error = true;
         }
     }
     for notice in skipped_root_notices(&fs_paths) {
-        eprintln!("todo-by: {notice}");
+        note!("{notice}");
     }
 
     if cli.files {
@@ -911,7 +930,7 @@ fn main() -> ExitCode {
                 scanner::scan_bytes("<stdin>", &input, &ctx, &mut findings);
             }
             Err(err) => {
-                eprintln!("todo-by: <stdin>: {err}");
+                note!("<stdin>: {err}");
                 had_error = true;
             }
         }
@@ -954,7 +973,7 @@ fn main() -> ExitCode {
             // error, drop only the candidates that can't be judged without
             // a version, and render the rest; the run still exits 2.
             Err(err) => {
-                eprintln!("todo-by: {err}");
+                note!("{err}");
                 had_error = true;
                 findings.retain(|f| !matches!(f.kind, scanner::Kind::VersionPending { .. }));
             }
@@ -991,7 +1010,7 @@ fn main() -> ExitCode {
             // those findings are true, and the run exits 2 either way.
             let (outcomes, failures) = issue::resolve(&refs, cfg.repo.as_ref(), &start_dir);
             for err in &failures {
-                eprintln!("todo-by: {err}");
+                note!("{err}");
             }
             had_error = had_error || !failures.is_empty();
             resolve_issue_candidates(&mut findings, outcomes);
@@ -1000,8 +1019,8 @@ fn main() -> ExitCode {
             // configured state. It is still said out loud, because a tag
             // that silently never fires is the failure this tool exists to
             // prevent.
-            eprintln!(
-                "todo-by: {pending_issues} issue tag{} not checked (pass --online to check GitHub)",
+            note!(
+                "{pending_issues} issue tag{} not checked (pass --online to check GitHub)",
                 if pending_issues == 1 { "" } else { "s" }
             );
             findings.retain(|f| !matches!(f.kind, scanner::Kind::IssuePending { .. }));
