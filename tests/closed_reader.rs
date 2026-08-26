@@ -12,6 +12,16 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+/// The fixture's tag, spelled in two halves so this file does not carry
+/// one whole.
+///
+/// CI scans this repository with the tool itself, and a literal date tag
+/// in a fixture is indistinguishable from an overdue tag in real source:
+/// the dogfood run reported this file and failed the build. The scanner
+/// matches contiguous text, so splitting the marker keeps the fixture
+/// honest and the repository clean.
+const OVERDUE_TAG: &str = concat!("// todo-", "by 2000-01-01: expired long ago\n");
+
 /// Builds a tree whose output cannot fit in a pipe buffer.
 ///
 /// That size is the whole point. A write only fails once it has to wait
@@ -92,11 +102,7 @@ fn findings_into_a_closed_pipe_keep_their_exit_code() {
     // still fails a job whose tree has overdue tags. A blanket exit 0,
     // which is what ripgrep and bat return for a broken pipe, would pass
     // it silently.
-    let dir = tree(
-        "findings",
-        3000,
-        "// todo-by 2000-01-01: expired long ago\n",
-    );
+    let dir = tree("findings", 3000, OVERDUE_TAG);
     let (code, stderr) = run_and_stop_reading(&[], &dir);
     let _ = fs::remove_dir_all(&dir);
 
@@ -111,7 +117,7 @@ fn workflow_commands_into_a_closed_pipe_keep_their_exit_code() {
     // The format CI itself runs under, and the one arm of `render` with no
     // summary of its own. Nothing about a closed reader changes here
     // either: a job that scanned overdue tags still fails.
-    let dir = tree("github", 3000, "// todo-by 2000-01-01: expired long ago\n");
+    let dir = tree("github", 3000, OVERDUE_TAG);
     let (code, stderr) = run_and_stop_reading(&["--format", "github"], &dir);
     let _ = fs::remove_dir_all(&dir);
 
