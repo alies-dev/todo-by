@@ -65,7 +65,6 @@ todo-by --current-version 2.1.0 # override the project's current version, for ve
 todo-by --warn 14               # also report tags due within 14 days, as warnings
 todo-by --exit-zero             # always exit 0 on findings (still 2 on errors)
 todo-by --color always          # auto, always, never (default: auto)
-todo-by --hidden                # also scan hidden files and directories
 todo-by --files                 # list files that would be scanned, then exit
 todo-by --dump-config           # print effective config, then exit
 ```
@@ -148,7 +147,7 @@ Full workflow, checksum pinning, and how to phase it in on a codebase that alrea
 
 ## What gets scanned
 
-Everything git would track. `todo-by` uses ripgrep's directory walker, so `.gitignore` is honored with full git semantics (nested files, negation, `**` globs, `.git/info/exclude`), even outside a repository. Hidden, binary and symlinked files are skipped; `--hidden` includes hidden ones. A file named on the command line is always scanned.
+Everything git would track. `todo-by` uses ripgrep's directory walker, so `.gitignore` is honored with full git semantics (nested files, negation, `**` globs, `.git/info/exclude`), even outside a repository. Dotfiles and dotted directories are scanned like any other, `.github/workflows` among them, because git tracks them. `.git` is never walked, at any depth. Binary and symlinked files are skipped. A file named on the command line is always scanned.
 
 ## Configuration
 

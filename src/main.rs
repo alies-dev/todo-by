@@ -45,7 +45,6 @@ Options:
       --offline            Never check issue triggers, overriding config
       --exit-zero          Always exit 0 on findings (still 2 on errors)
       --color <WHEN>       Color: auto, always, never [default: auto]
-      --hidden             Also scan hidden files and directories
       --files              List files that would be scanned, then exit
       --dump-config        Print effective config, then exit
   -h, --help               Print help
@@ -74,7 +73,6 @@ struct Cli {
     online: Option<bool>,
     exit_zero: bool,
     color: ColorWhen,
-    hidden: bool,
     files: bool,
     dump_config: bool,
 }
@@ -89,7 +87,6 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
         online: None,
         exit_zero: false,
         color: ColorWhen::Auto,
-        hidden: false,
         files: false,
         dump_config: false,
     };
@@ -157,7 +154,12 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
                     }
                 }
             }
-            "--hidden" => cli.hidden = true,
+            // Hidden files are scanned unconditionally now, so this flag
+            // asks for what already happens. It stays accepted, and stays
+            // silent, because the CLI surface is frozen after a release and
+            // a CI job passing it must neither fail nor start printing on
+            // every run. It is out of --help: there is nothing to choose.
+            "--hidden" => {}
             "--files" => cli.files = true,
             "--dump-config" => cli.dump_config = true,
             "-h" | "--help" => {
@@ -563,28 +565,49 @@ fn build_overrides(root: &Path, patterns: &[String]) -> Result<Option<Override>,
         .map_err(|err| format!("invalid exclude patterns: {err}"))
 }
 
+/// The walker both scanning modes share, so that `--files` can never
+/// report a different set of files than the scan actually reads.
+///
+/// Hidden files are walked: what git tracks is the promise this tool
+/// makes, and `.github/workflows` is one of the most natural homes for a
+/// dated tag. `.gitignore` stays the only filter, with one exception:
+/// `.git` itself is never walked, at any depth. Nothing in it is tracked
+/// content, and `.git/COMMIT_EDITMSG` and `.git/logs` hold commit
+/// messages, so a commit that merely *discusses* a tag would otherwise be
+/// read as carrying one. Matching on the name rather than on a path also
+/// catches the `.git` of a submodule or a nested checkout, and the `.git`
+/// *file* a worktree gets instead of a directory.
+///
+/// Returns `None` for an empty root list, which `ignore` cannot build.
+fn walk_builder(roots: &[PathBuf], overrides: Option<Override>) -> Option<WalkBuilder> {
+    let (first, rest) = roots.split_first()?;
+    let mut builder = WalkBuilder::new(first);
+    for root in rest {
+        builder.add(root);
+    }
+    builder
+        .hidden(false)
+        .require_git(false)
+        .filter_entry(|entry| entry.file_name() != ".git");
+    if let Some(ov) = overrides {
+        builder.overrides(ov);
+    }
+    Some(builder)
+}
+
 /// Walks `roots` (already filtered to existing, non-stdin paths) in
 /// parallel, scanning every file. Returns findings and whether any I/O
 /// error occurred.
 fn scan_roots(
     roots: &[PathBuf],
-    hidden: bool,
     overrides: Option<Override>,
     today: Date,
     warn_until: Option<Date>,
     tags: &[String],
 ) -> (Vec<Finding>, bool) {
-    let Some((first, rest)) = roots.split_first() else {
+    let Some(builder) = walk_builder(roots, overrides) else {
         return (Vec::new(), false);
     };
-    let mut builder = WalkBuilder::new(first);
-    for root in rest {
-        builder.add(root);
-    }
-    builder.hidden(!hidden).require_git(false);
-    if let Some(ov) = overrides {
-        builder.overrides(ov);
-    }
 
     let io_error = AtomicBool::new(false);
     let (tx, rx) = mpsc::channel::<Finding>();
@@ -624,22 +647,10 @@ fn scan_roots(
 }
 
 /// Walks `roots` single-threaded, collecting file paths for `--files`.
-fn list_file_paths(
-    roots: &[PathBuf],
-    hidden: bool,
-    overrides: Option<Override>,
-) -> (Vec<String>, bool) {
-    let Some((first, rest)) = roots.split_first() else {
+fn list_file_paths(roots: &[PathBuf], overrides: Option<Override>) -> (Vec<String>, bool) {
+    let Some(builder) = walk_builder(roots, overrides) else {
         return (Vec::new(), false);
     };
-    let mut builder = WalkBuilder::new(first);
-    for root in rest {
-        builder.add(root);
-    }
-    builder.hidden(!hidden).require_git(false);
-    if let Some(ov) = overrides {
-        builder.overrides(ov);
-    }
 
     let mut had_error = false;
     let mut paths = Vec::new();
@@ -768,7 +779,7 @@ fn main() -> ExitCode {
     }
 
     if cli.files {
-        let (paths, walk_error) = list_file_paths(&fs_paths, cli.hidden, overrides);
+        let (paths, walk_error) = list_file_paths(&fs_paths, overrides);
         for p in &paths {
             println!("{p}");
         }
@@ -779,9 +790,7 @@ fn main() -> ExitCode {
         };
     }
 
-    let (mut findings, walk_error) = scan_roots(
-        &fs_paths, cli.hidden, overrides, today, warn_until, &cfg.tags,
-    );
+    let (mut findings, walk_error) = scan_roots(&fs_paths, overrides, today, warn_until, &cfg.tags);
     had_error = had_error || walk_error;
 
     if has_stdin {
@@ -1404,10 +1413,13 @@ mod tests {
             let err = parse_args(args(&[arg])).expect_err("rejected");
             assert!(err.contains("takes no value"), "{arg}: {err}");
         }
-        // The bare forms still work.
+        // The bare forms still work. `--hidden` no longer sets anything,
+        // but it must still parse: an existing CI invocation carrying it
+        // has to keep running, and it has to keep being a valueless flag.
         let cli = parse_args(args(&["--online", "--exit-zero", "--hidden"])).expect("valid");
         assert_eq!(cli.online, Some(true));
-        assert!(cli.exit_zero && cli.hidden);
+        assert!(cli.exit_zero);
+        assert_eq!(cli.paths, vec![PathBuf::from(".")]);
     }
 
     #[test]
@@ -1484,5 +1496,103 @@ mod tests {
             &findings[0].kind,
             scanner::Kind::IssueClosed { written, .. } if written == "#1"
         ));
+    }
+
+    /// Lays out a tree with one tracked file in a dotdir, one ignored
+    /// file, and two shapes of `.git`: a real directory at the root and
+    /// the plain file a worktree or submodule gets instead.
+    fn walk_fixture(tag: &str) -> PathBuf {
+        let root = unique_temp_dir(tag);
+        let write = |rel: &str, body: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        write("visible.txt", "plain\n");
+        write(
+            ".github/workflows/ci.yml",
+            "# todo-by 2998-01-01 unpin the action\n",
+        );
+        write(".gitignore", "ignored.txt\n");
+        write("ignored.txt", "# todo-by 2998-01-01 never read\n");
+        // Commit messages, which discuss tags in the same words a tag
+        // uses. Reading them is what made `--hidden` report phantoms.
+        write(
+            ".git/COMMIT_EDITMSG",
+            "fix: drop the todo-by 2998-01-01 tag\n",
+        );
+        write(".git/logs/HEAD", "0000 1111 commit: todo-by 2998-01-01\n");
+        write("worktree/.git", "gitdir: ../.git/worktrees/wt\n");
+        write("worktree/kept.txt", "plain\n");
+        root
+    }
+
+    fn walked(root: &Path) -> Vec<String> {
+        let (paths, had_error) = list_file_paths(std::slice::from_ref(&root.to_path_buf()), None);
+        assert!(!had_error, "walk reported an I/O error");
+        paths
+            .iter()
+            .map(|p| {
+                Path::new(p)
+                    .strip_prefix(root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_walk_covers_hidden_files_and_never_enters_a_git_dir() {
+        let root = walk_fixture("walk");
+        let mut files = walked(&root);
+        files.sort();
+
+        // Hidden by name, tracked by git: the case the tool exists for.
+        assert_eq!(
+            files,
+            vec![
+                ".github/workflows/ci.yml",
+                ".gitignore",
+                "visible.txt",
+                "worktree/kept.txt",
+            ],
+            "unexpected file set"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn scanning_agrees_with_the_file_list_it_advertises() {
+        // `--files` exists to answer "what will be scanned", so the two
+        // walks have to be the same walk. They were separate builders
+        // once, and a filter added to one would not reach the other.
+        let root = walk_fixture("scan");
+        let today = Date::parse_full("2999-01-01").unwrap();
+        let tags = vec!["todo-by".to_string()];
+        let (findings, had_error) = scan_roots(
+            std::slice::from_ref(&root.to_path_buf()),
+            None,
+            today,
+            None,
+            &tags,
+        );
+        assert!(!had_error);
+
+        let mut hit_files: Vec<String> = findings
+            .iter()
+            .map(|f| {
+                Path::new(&f.file)
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect();
+        hit_files.sort();
+        assert_eq!(hit_files, vec![".github/workflows/ci.yml"]);
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }

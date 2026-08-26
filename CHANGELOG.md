@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Hidden files and directories are scanned by default. `.gitignore` is the only filter now, which is what "everything git would track" already claimed. A tag in `.github/workflows` (a pinned action version, a step commented out until a fix lands) was silently never checked, which is the exact failure this tool exists to prevent. Repositories that keep tags in dotfiles will see findings they did not see before.
+- `--hidden` asks for what now always happens, so it does nothing. It is still accepted, and still silent, so a CI job already passing it keeps working; it no longer appears in `--help`.
+
+### Fixed
+
+- `.git` is never walked, with or without `--hidden`. It accounted for 97% of the files a `--hidden` scan read, and worse, `.git/COMMIT_EDITMSG` and `.git/logs` hold commit messages: a commit that merely discussed a tag read to the scanner exactly like the tag itself. The directory is matched by name, so the `.git` of a submodule or a nested checkout goes too, as does the `.git` file a worktree gets in place of a directory.
+
 ## [0.4.0] - 2026-08-26
 
 ### Added
