@@ -69,7 +69,7 @@ todo-by --files                 # list files that would be scanned, then exit
 todo-by --dump-config           # print effective config, then exit
 ```
 
-Exit codes: `0` no findings (warnings alone still exit 0), `1` findings, `2` usage, config, or I/O error.
+Exit codes: `0` no findings (warnings alone still exit 0), `1` findings, `2` usage, config, or I/O error, or a run left with no path it was allowed to scan.
 A reader that stops reading is not one of them: `todo-by | head -4` ends the output where `head` stopped and reports on the scan it ran, so `set -o pipefail` still fails a job whose tree has overdue tags.
 
 ## Triggers
@@ -148,7 +148,7 @@ Full workflow, checksum pinning, and how to phase it in on a codebase that alrea
 
 ## What gets scanned
 
-Everything git would track. `todo-by` uses ripgrep's directory walker, so `.gitignore` is honored with full git semantics (nested files, negation, `**` globs, `.git/info/exclude`), even outside a repository. Dotfiles and dotted directories are scanned like any other, `.github/workflows` among them, because git tracks them. Version control metadata (`.git`, `.hg`, `.svn`, `.jj`) is never walked, at no depth, and neither it nor anything inside it can be reached by naming a path either. Binary and symlinked files are skipped. Any other file named on the command line is scanned even when `.gitignore` covers it, and the `exclude` config key covers whatever `.gitignore` does not.
+Everything git would track. `todo-by` uses ripgrep's directory walker, so `.gitignore` is honored with full git semantics (nested files, negation, `**` globs, `.git/info/exclude`), even outside a repository. Dotfiles and dotted directories are scanned like any other, `.github/workflows` among them, because git tracks them. Version control metadata (`.git`, `.hg`, `.svn`, `.jj`) is never walked, at no depth, and neither it nor anything inside it can be reached by naming a path either. Binary files are skipped, and so are symlinks the walk runs into, because it never follows one. A path named on the command line is where the walk starts rather than something it found, so `.gitignore` does not apply to it and a symlink is followed to its target: naming an ignored file scans that file, and naming an ignored directory scans it in full. The `exclude` config key covers whatever `.gitignore` does not.
 
 ## Configuration
 

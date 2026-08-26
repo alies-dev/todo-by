@@ -1,12 +1,12 @@
 // The whole point of `crate::stdout` and `note!` is that they are the only
 // ways out. A `println!` or `eprintln!` anywhere else reintroduces the
-// panic they exist to remove, so the compiler, not a reviewer, is what
-// keeps them from coming back.
+// panic they exist to remove, so clippy, not a reviewer, is what keeps
+// them from coming back (CI runs it with `-D warnings`).
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 
 use std::ffi::OsStr;
-use std::io::{self, IsTerminal, Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::{self, IsTerminal, Write};
+use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -76,7 +76,8 @@ Options:
   -h, --help               Print help
   -V, --version            Print version
 
-Exit codes: 0 no findings, 1 findings, 2 usage, config, or I/O error";
+Exit codes: 0 no findings, 1 findings, 2 usage, config, or I/O error,
+            or nothing left that the scan was allowed to read";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ColorWhen {
@@ -609,24 +610,60 @@ fn build_overrides(root: &Path, patterns: &[String]) -> Result<Option<Override>,
         .map_err(|err| format!("invalid exclude patterns: {err}"))
 }
 
-/// Metadata directories no scan should ever enter. Each one stores commit
-/// messages, and the last two store whole copies of tracked files as well,
-/// so walking them turns one tag into a phantom finding at a path nobody
-/// can edit, or into a duplicate of a finding already reported.
+/// Metadata directories no scan should ever enter. Every one of them
+/// keeps commit messages and the like, and a text field sits uncompressed
+/// inside its record whatever the encoding, so it reads to a scanner
+/// working on plain text exactly like the tag it was describing.
+/// `.svn/pristine` stores whole copies of tracked files on top of that
+/// (`.jj` does too, on its non-default backend), which turns a real
+/// finding into a duplicate at a path nobody can edit.
 const VCS_DIRS: [&str; 4] = [".git", ".hg", ".svn", ".jj"];
 
 fn is_vcs_dir(name: &OsStr) -> bool {
     name.to_str().is_some_and(|name| VCS_DIRS.contains(&name))
 }
 
+/// True when `path`, read as written, names one of [`VCS_DIRS`] or sits
+/// inside one.
+///
+/// `.` and `x/..` are cancelled first, so `$(git rev-parse --git-dir)/..`
+/// reads as the worktree root it is rather than as something inside
+/// `.git`. Cancelling `..` textually is not the same as resolving it when
+/// a symlink is involved, but it errs safely here: it can only make a
+/// path look more like metadata than it is, never less.
+fn names_vcs_dir(path: &Path) -> bool {
+    let mut kept: Vec<&OsStr> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // Cancels the component before it. One with nothing left
+                // to cancel walks out of the path as written, and what
+                // lies above is the resolved path's business.
+                kept.pop();
+            }
+            Component::Normal(name) => kept.push(name),
+            // Neither is ever a metadata directory, and neither can be
+            // cancelled by a `..` that follows it.
+            Component::RootDir | Component::Prefix(_) => kept.clear(),
+        }
+    }
+    kept.into_iter().any(is_vcs_dir)
+}
+
 /// True when `path` names one of [`VCS_DIRS`] or sits inside one, whether
 /// it is the usual directory or the plain file a git worktree gets.
-/// Resolved first, so that running from within one is caught as well as
-/// naming it: a relative root carries no such component of its own.
+///
+/// Both spellings are checked, because neither covers the other. The
+/// resolved path catches a root that carries no such component of its
+/// own: a relative `.` run from inside `.git`, or a symlink pointing at
+/// one. The path as written catches the reverse, a symlink *under* a
+/// metadata directory whose target lies outside it (`.git/hooks` is the
+/// plausible one), since resolving that erases the very component being
+/// matched on.
 fn inside_vcs_dir(path: &Path) -> bool {
-    let resolved = std::fs::canonicalize(path);
-    let probe = resolved.as_deref().unwrap_or(path);
-    probe.components().any(|c| is_vcs_dir(c.as_os_str()))
+    names_vcs_dir(path)
+        || std::fs::canonicalize(path).is_ok_and(|resolved| names_vcs_dir(&resolved))
 }
 
 /// The roots `walk_builder` will drop, phrased for the user. Dropping
@@ -645,6 +682,41 @@ fn skipped_root_notices(roots: &[PathBuf]) -> Vec<String> {
             )
         })
         .collect()
+}
+
+/// Whether the walk was left with nowhere to start because every root it
+/// was given was dropped as version control metadata.
+///
+/// That run walked nothing at all, and from the outside it is
+/// indistinguishable from a clean scan: no output, exit 0. The same
+/// reasoning that makes [`skipped_root_notices`] worth printing makes the
+/// exit code worth setting. A run that kept at least one root is not this
+/// case: it scanned what it was given, and the notice names what it left
+/// out.
+///
+/// Refusing a metadata root is policy rather than failure, which is why
+/// this is narrower than the neighbouring missing-path check: that one
+/// exits 2 for a single bad path, since a path that is not there is a
+/// mistake in the invocation and nothing the tool promises to do about
+/// it. Being left with nothing to read is the one case where the policy
+/// has the same effect as the mistake.
+///
+/// Empty roots means none were given at all, which is not a dropped root.
+/// Whether that is an error is the caller's to decide, since stdin may
+/// still be a source; see [`nothing_left_to_read`].
+fn every_root_dropped(roots: &[PathBuf]) -> bool {
+    !roots.is_empty() && roots.iter().all(|root| inside_vcs_dir(root))
+}
+
+/// Whether a scan has no source left after the dropped roots are gone.
+///
+/// Stdin counts, and that is the whole difference from
+/// [`every_root_dropped`]: `todo-by - .git` reads stdin, reports what it
+/// finds there, and is a scan that ran. `--files` is the exception, since
+/// it lists walked paths and never reads stdin at all, so nothing on
+/// stdin can save it from having nothing to list.
+fn nothing_left_to_read(roots: &[PathBuf], has_stdin: bool) -> bool {
+    !has_stdin && every_root_dropped(roots)
 }
 
 /// The walker configuration both scanning modes share, so `--files` and
@@ -711,7 +783,14 @@ fn scan_roots(
                             io_error.store(true, Ordering::Relaxed);
                         }
                         for finding in local {
-                            let _ = tx.send(finding);
+                            // The receiver is `rx`, which this function
+                            // holds until every walker thread has joined,
+                            // so a send failure means a finding was
+                            // dropped on the floor rather than reported.
+                            // Naming that keeps a later streaming
+                            // refactor from losing findings silently.
+                            tx.send(finding)
+                                .expect("findings receiver outlives the walk");
                         }
                     }
                 }
@@ -897,6 +976,9 @@ fn main() -> ExitCode {
     }
 
     if cli.files {
+        // `--files` never reads stdin, so a `-` among the paths cannot
+        // stand in for the roots that were dropped.
+        had_error = had_error || every_root_dropped(&fs_paths);
         let (paths, walk_error) = list_file_paths(&fs_paths, overrides);
         if let Err(code) = write_stdout(|w| {
             for p in &paths {
@@ -913,26 +995,24 @@ fn main() -> ExitCode {
         };
     }
 
+    had_error = had_error || nothing_left_to_read(&fs_paths, has_stdin);
     let (mut findings, walk_error) = scan_roots(&fs_paths, overrides, today, warn_until, &cfg.tags);
     had_error = had_error || walk_error;
 
     if has_stdin {
-        // Raw bytes, not read_to_string: invalid UTF-8 on stdin must scan
-        // lossily like file contents do, not abort with an I/O error.
-        let mut input = Vec::new();
-        match Read::read_to_end(&mut std::io::stdin(), &mut input) {
-            Ok(_) => {
-                let ctx = ScanCtx {
-                    today,
-                    warn_until,
-                    tags: &cfg.tags,
-                };
-                scanner::scan_bytes("<stdin>", &input, &ctx, &mut findings);
-            }
-            Err(err) => {
-                note!("<stdin>: {err}");
-                had_error = true;
-            }
+        // The same reader a file gets, for both reasons that matters:
+        // invalid UTF-8 scans lossily rather than aborting with an I/O
+        // error, and `cat big.bin | todo-by -` is classified from its
+        // prefix instead of being held whole first.
+        let ctx = ScanCtx {
+            today,
+            warn_until,
+            tags: &cfg.tags,
+        };
+        let stdin = std::io::stdin();
+        if let Err(err) = scanner::scan_reader("<stdin>", &mut stdin.lock(), &ctx, &mut findings) {
+            note!("<stdin>: {err}");
+            had_error = true;
         }
     }
 
@@ -1691,17 +1771,30 @@ mod tests {
             "// todo-by 2998-01-01 plain file\n",
         );
         write(".jj/repo/store/op_heads", "op: todo-by 2998-01-01 stored\n");
+        // Reached by the walk, dropped by the scan, which is the only
+        // difference the two modes are allowed to have. Without it the
+        // two sets match for want of anything to disagree about.
+        write(
+            WALK_FIXTURE_BINARY,
+            "\0// todo-by 2998-01-01 inside a binary\n",
+        );
         root
     }
 
     /// The fixture files left once the gitignored ones and everything
-    /// named as, or held by, a metadata directory are gone.
-    const WALK_FIXTURE_FILES: [&str; 4] = [
+    /// named as, or held by, a metadata directory are gone: what `--files`
+    /// lists.
+    const WALK_FIXTURE_FILES: [&str; 5] = [
         ".github/workflows/ci.yml",
         ".gitignore",
+        "binary.dat",
         "visible.txt",
         "worktree/kept.txt",
     ];
+
+    /// The one member of [`WALK_FIXTURE_FILES`] the scan drops after the
+    /// walk has already yielded it.
+    const WALK_FIXTURE_BINARY: &str = "binary.dat";
 
     fn relative_to(root: &Path, paths: impl IntoIterator<Item = String>) -> Vec<String> {
         let mut out: Vec<String> = paths
@@ -1753,7 +1846,19 @@ mod tests {
         // scan actually read.
         let root = walk_fixture("scan");
         let roots = vec![root.clone()];
-        assert_eq!(scanned(&roots, &root, None), walked(&roots, &root, None));
+        let listed = walked(&roots, &root, None);
+        assert!(
+            listed.iter().any(|p| p == WALK_FIXTURE_BINARY),
+            "the fixture must reach the walk for the divergence to mean anything: {listed:?}"
+        );
+        // Advertised minus the binary content `--files` cannot know about
+        // without reading, which is the one divergence by design. Anything
+        // else diverging is the two walks drifting apart.
+        let expected: Vec<String> = listed
+            .into_iter()
+            .filter(|p| p != WALK_FIXTURE_BINARY)
+            .collect();
+        assert_eq!(scanned(&roots, &root, None), expected);
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -1785,6 +1890,24 @@ mod tests {
         let link = root.join("shortcut");
         std::os::unix::fs::symlink(root.join(".git"), &link).unwrap();
         assert!(walked(std::slice::from_ref(&link), &root, None).is_empty());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_symlink_under_a_metadata_dir_is_dropped_even_when_it_escapes() {
+        // The mirror of the test above, and the case resolving alone gets
+        // wrong: canonicalizing `.git/hooks/link` erases the `.git`
+        // component it was going to be matched on, so the target gets
+        // walked under a path the docs promise is never reached. Matching
+        // the path as written is what stops it.
+        let root = walk_fixture("escape");
+        let link = root.join(".git").join("escape");
+        std::os::unix::fs::symlink(root.join("worktree"), &link).unwrap();
+        assert!(
+            walked(std::slice::from_ref(&link), &root, None).is_empty(),
+            "a symlink under .git reached its target"
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -1823,6 +1946,51 @@ mod tests {
         assert!(notices[0].contains(&git.display().to_string()));
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn dropping_every_root_is_an_error_but_dropping_some_is_not() {
+        let root = walk_fixture("all-dropped");
+        let git = root.join(".git");
+
+        assert!(
+            every_root_dropped(&[git.clone(), git.join("logs")]),
+            "nothing was left to walk, which must not exit 0"
+        );
+        assert!(
+            !every_root_dropped(&[root.clone(), git.clone()]),
+            "a run that still scanned a root is not an error"
+        );
+        assert!(
+            !every_root_dropped(&[]),
+            "no roots at all is not a dropped root"
+        );
+
+        // Stdin is a source like any other, so a scan reading it ran even
+        // with its only path refused. `--files` cannot lean on that,
+        // which is why it asks `every_root_dropped` directly.
+        assert!(!nothing_left_to_read(std::slice::from_ref(&git), true));
+        assert!(nothing_left_to_read(std::slice::from_ref(&git), false));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_parent_component_cancels_the_metadata_dir_before_it() {
+        // `$(git rev-parse --git-dir)/..` is how a script names the
+        // worktree root, and matching components as written would refuse
+        // it for the `.git` the `..` undoes.
+        assert!(!names_vcs_dir(Path::new(".git/../src")));
+        assert!(!names_vcs_dir(Path::new("../.git/../src")));
+        assert!(!names_vcs_dir(Path::new("./src")));
+        // What the cancelling must not reach.
+        assert!(names_vcs_dir(Path::new(".git")));
+        assert!(names_vcs_dir(Path::new("src/../.git/hooks")));
+        assert!(names_vcs_dir(Path::new("/tmp/repo/.git/logs/HEAD")));
+        // Exact names only: a directory that merely starts with one is
+        // ordinary content.
+        assert!(!names_vcs_dir(Path::new(".github/workflows")));
+        assert!(!names_vcs_dir(Path::new(".gitignore")));
     }
 
     #[test]
@@ -1865,7 +2033,12 @@ mod tests {
             .expect("some overrides");
         assert_eq!(
             walked(&roots, &root, Some(overrides)),
-            [".gitignore", "visible.txt", "worktree/kept.txt"]
+            [
+                ".gitignore",
+                "binary.dat",
+                "visible.txt",
+                "worktree/kept.txt"
+            ]
         );
         std::fs::remove_dir_all(&root).ok();
     }

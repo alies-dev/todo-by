@@ -22,23 +22,41 @@ use std::process::{Command, Stdio};
 /// honest and the repository clean.
 const OVERDUE_TAG: &str = concat!("// todo-", "by 2000-01-01: expired long ago\n");
 
+/// The output a test needs before a closed reader can break anything.
+/// Twice the 64 KB a pipe buffer holds on Linux, which is the larger of
+/// the two platforms CI runs.
+const MIN_PIPE_FILLING_OUTPUT: usize = 128 * 1024;
+
 /// Builds a tree whose output cannot fit in a pipe buffer.
 ///
 /// That size is the whole point. A write only fails once it has to wait
 /// for a reader, so an output small enough to sit in the buffer succeeds
 /// no matter who is listening: scanning this repository, `--files` prints
-/// 27 lines, `| head -4` never broke, and the bug went unnoticed until
-/// someone pointed the tool at something large. 3000 files put a few
+/// a few dozen lines, `| head -4` never broke, and the bug went unnoticed
+/// until someone pointed the tool at something large. 3000 files put a few
 /// hundred KB through a buffer that holds 64.
+///
+/// The assert is what keeps that true. Shrink the file count, or run
+/// somewhere `temp_dir()` is short enough, and every write in every test
+/// below starts succeeding: four green tests exercising nothing at all.
 fn tree(name: &str, files: usize, contents: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("todo-by-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("temp dir");
+    let mut printed = 0;
     for i in 0..files {
         // Long enough that the paths alone outgrow the buffer.
         let path = dir.join(format!("a-file-with-a-realistic-length-of-name-{i:05}.rs"));
         fs::write(&path, contents).expect("fixture file");
+        // What `--files` will print: one path per line. The finding
+        // formats are all longer, so this is the floor for every test.
+        printed += path.display().to_string().len() + 1;
     }
+    assert!(
+        printed > MIN_PIPE_FILLING_OUTPUT,
+        "fixture prints only {printed} bytes, which fits in a pipe buffer: \
+         no write can fail and the tests below prove nothing"
+    );
     dir
 }
 
