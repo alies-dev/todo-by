@@ -32,12 +32,30 @@ fn tree(name: &str, files: usize, contents: &str) -> PathBuf {
     dir
 }
 
+/// A run that answers to its arguments and nothing else.
+///
+/// The environment decides a great deal here: `GITHUB_ACTIONS` alone
+/// switches the output format to workflow commands, which have no summary
+/// line, and the tests run inside CI as often as outside it. The working
+/// directory matters too, since a `todo-by.toml` anywhere above it would
+/// be loaded. Both are pinned so a test measures the code and not the
+/// machine it runs on.
+fn todo_by(args: &[&str], dir: &Path) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_todo-by"));
+    cmd.args(args)
+        .arg(dir)
+        .current_dir(dir)
+        .env_remove("GITHUB_ACTIONS")
+        .env_remove("TODO_BY_FORMAT")
+        .env_remove("TODO_BY_WARN")
+        .env_remove("TODO_BY_VERSION");
+    cmd
+}
+
 /// Spawns `todo-by` over `dir`, reads one line, then closes the pipe the
 /// way `head` does, and returns the exit code and everything on stderr.
 fn run_and_stop_reading(args: &[&str], dir: &Path) -> (Option<i32>, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_todo-by"))
-        .args(args)
-        .arg(dir)
+    let mut child = todo_by(args, dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -89,13 +107,24 @@ fn findings_into_a_closed_pipe_keep_their_exit_code() {
 }
 
 #[test]
+fn workflow_commands_into_a_closed_pipe_keep_their_exit_code() {
+    // The format CI itself runs under, and the one arm of `render` with no
+    // summary of its own. Nothing about a closed reader changes here
+    // either: a job that scanned overdue tags still fails.
+    let dir = tree("github", 3000, "// todo-by 2000-01-01: expired long ago\n");
+    let (code, stderr) = run_and_stop_reading(&["--format", "github"], &dir);
+    let _ = fs::remove_dir_all(&dir);
+
+    assert!(!stderr.contains("panicked"), "stderr: {stderr}");
+    assert_eq!(code, Some(1), "stderr: {stderr}");
+}
+
+#[test]
 fn a_closed_pipe_does_not_hide_a_real_error() {
     // An unreadable path is an error whatever the reader does, so the
     // broken pipe must not talk the run down from 2 to 0.
     let dir = tree("error", 3000, "nothing to find here\n");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_todo-by"))
-        .arg("--files")
-        .arg(&dir)
+    let mut child = todo_by(&["--files"], &dir)
         .arg(dir.join("no-such-path"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
