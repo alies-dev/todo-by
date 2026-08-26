@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Hidden files and directories are scanned by default. Being hidden is no longer a reason to skip anything: the ignore files and the `exclude` config key decide alone, which is what "everything git would track" already claimed. A tag in `.github/workflows` (a pinned action version, a step commented out until a fix lands) was silently never checked, which is the exact failure this tool exists to prevent. Repositories that keep tags in dotfiles will see findings they did not see before, and `exclude` is how to quiet a large dotted directory that `.gitignore` does not cover.
+- `--hidden` asks for what now always happens, so it does nothing. It is still accepted, so a CI job already passing it keeps working, and it no longer appears in `--help`. Passing it prints a deprecation notice on stderr naming the release that removes it, 1.0. Notices are collected during parsing and printed once, before any finding, so the next retired flag costs a line rather than a design.
+
+### Fixed
+
+- Version control metadata is never walked, with or without `--hidden`. `.git` accounted for 97% of the files a `--hidden` scan read in this repository, and worse, `.git/COMMIT_EDITMSG` and `.git/logs` hold commit messages: a commit that merely discussed a tag read to the scanner exactly like the tag itself. `.hg` stores the same thing, and `.svn` and `.jj` store whole copies of tracked files, which turns every real finding into a duplicate at a path nobody can edit. All four are matched by name, so a submodule's or a nested checkout's metadata goes too, as does the `.git` file a worktree gets in place of a directory. Naming one as a path argument does not reach it either, nor does running from inside it. A root dropped for this reason is named on stderr, since a scan that could not run must not look like a scan that found nothing.
+
 ## [0.4.0] - 2026-08-26
 
 ### Added
