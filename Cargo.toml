@@ -1,6 +1,6 @@
 [package]
 name = "todo-by-cli"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 # Floor set by the `ignore` dependency, which declares rust-version 1.88 from
 # 0.4.31 on. Single source of truth: the msrv job in CI reads this field, and

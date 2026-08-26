@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-26
+
 ### Changed
 
 - Hidden files and directories are scanned by default. Being hidden is no longer a reason to skip anything: the ignore files and the `exclude` config key decide alone, which is what "everything git would track" already claimed. A tag in `.github/workflows` (a pinned action version, a step commented out until a fix lands) was silently never checked, which is the exact failure this tool exists to prevent. Repositories that keep tags in dotfiles will see findings they did not see before, and `exclude` is how to quiet a large dotted directory that `.gitignore` does not cover. The `todo-by . .github` idiom, which named the dotted directory because that was the only way to reach it, is now redundant and harmless: overlapping roots report their shared files once.
@@ -92,7 +94,8 @@ Initial release.
 - Exit codes: 0 clean, 1 findings, 2 error.
 - `--today` to override the clock for testing and dry runs.
 
-[Unreleased]: https://github.com/alies-dev/todo-by/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/alies-dev/todo-by/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/alies-dev/todo-by/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/alies-dev/todo-by/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/alies-dev/todo-by/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/alies-dev/todo-by/compare/v0.2.0...v0.2.1
