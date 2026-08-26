@@ -159,6 +159,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
             // silent, because the CLI surface is frozen after a release and
             // a CI job passing it must neither fail nor start printing on
             // every run. It is out of --help: there is nothing to choose.
+            // todo-by v1.0 delete this arm and its entry in VALUELESS.
+            // A major bump is the point at which dropping an accepted flag
+            // stops being a breaking change made by surprise.
             "--hidden" => {}
             "--files" => cli.files = true,
             "--dump-config" => cli.dump_config = true,
