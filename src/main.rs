@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -568,13 +569,24 @@ fn build_overrides(root: &Path, patterns: &[String]) -> Result<Option<Override>,
         .map_err(|err| format!("invalid exclude patterns: {err}"))
 }
 
-/// True when `path` is a `.git` directory or sits inside one. Resolved
-/// first, so that running from within `.git` is caught as well as naming
-/// it: a relative root carries no `.git` component of its own.
-fn inside_git_dir(path: &Path) -> bool {
+/// Metadata directories no scan should ever enter. Each one stores commit
+/// messages, and the last two store whole copies of tracked files as well,
+/// so walking them turns one tag into a phantom finding at a path nobody
+/// can edit, or into a duplicate of a finding already reported.
+const VCS_DIRS: [&str; 4] = [".git", ".hg", ".svn", ".jj"];
+
+fn is_vcs_dir(name: &OsStr) -> bool {
+    name.to_str().is_some_and(|name| VCS_DIRS.contains(&name))
+}
+
+/// True when `path` names one of [`VCS_DIRS`] or sits inside one, whether
+/// it is the usual directory or the plain file a git worktree gets.
+/// Resolved first, so that running from within one is caught as well as
+/// naming it: a relative root carries no such component of its own.
+fn inside_vcs_dir(path: &Path) -> bool {
     let resolved = std::fs::canonicalize(path);
     let probe = resolved.as_deref().unwrap_or(path);
-    probe.components().any(|c| c.as_os_str() == ".git")
+    probe.components().any(|c| is_vcs_dir(c.as_os_str()))
 }
 
 /// The walker configuration both scanning modes share, so `--files` and
@@ -582,20 +594,17 @@ fn inside_git_dir(path: &Path) -> bool {
 /// differ by the binary files the scan drops after the walk yields them.
 ///
 /// `.gitignore` decides what is scanned, hidden entries included, with one
-/// exception: `.git` is never walked. Nothing in it is tracked content,
-/// and `.git/COMMIT_EDITMSG` and `.git/logs` hold commit messages, so a
-/// commit that merely *discusses* a tag would otherwise read as carrying
-/// one.
+/// exception: the [`VCS_DIRS`] are never walked.
 ///
 /// The exclusion matches on the entry name rather than on a path, so it
-/// catches the `.git` of a submodule or a nested checkout as well, and the
-/// `.git` *file* a worktree gets in place of a directory. Roots are
-/// filtered separately because `ignore` applies `filter_entry` only from
-/// depth 1 down, which would leave `todo-by .git` walking it after all.
+/// catches a submodule's or a nested checkout's metadata as well. Roots
+/// are filtered separately because `ignore` applies `filter_entry` only
+/// from depth 1 down, which would leave `todo-by .git` walking it anyway.
 ///
-/// Returns `None` when no root survives, which `ignore` cannot build from.
+/// Returns `None` when no root survives, since a walker needs at least one
+/// path to start from; the callers report an empty result instead.
 fn walk_builder(roots: &[PathBuf], overrides: Option<Override>) -> Option<WalkBuilder> {
-    let mut kept = roots.iter().filter(|root| !inside_git_dir(root));
+    let mut kept = roots.iter().filter(|root| !inside_vcs_dir(root));
     let mut builder = WalkBuilder::new(kept.next()?);
     for root in kept {
         builder.add(root);
@@ -603,7 +612,7 @@ fn walk_builder(roots: &[PathBuf], overrides: Option<Override>) -> Option<WalkBu
     builder
         .hidden(false)
         .require_git(false)
-        .filter_entry(|entry| entry.file_name() != ".git");
+        .filter_entry(|entry| !is_vcs_dir(entry.file_name()));
     if let Some(ov) = overrides {
         builder.overrides(ov);
     }
@@ -1514,8 +1523,9 @@ mod tests {
     }
 
     /// Every file the walk should reach carries a tag, so a findings set
-    /// and a file list can be compared directly. Two shapes of `.git`, per
-    /// `walk_builder`.
+    /// and a file list can be compared directly. Every file it should not
+    /// reach carries one too, so a leak announces itself instead of just
+    /// widening a count.
     fn walk_fixture(tag: &str) -> PathBuf {
         let root = unique_temp_dir(tag);
         let write = |rel: &str, body: &str| {
@@ -1530,7 +1540,7 @@ mod tests {
         );
         write(
             ".gitignore",
-            "# todo-by 2998-01-01 drop this\nignored.txt\n",
+            "# todo-by 2998-01-01 drop this\nignored.txt\n*.bak\n",
         );
         write(
             "worktree/kept.txt",
@@ -1538,15 +1548,30 @@ mod tests {
         );
         write("worktree/.git", "gitdir: ../.git/worktrees/wt\n");
         write("ignored.txt", "# todo-by 2998-01-01 never read\n");
+        // Hidden *and* gitignored: being hidden stopped mattering, being
+        // ignored did not.
+        write(".gitignore.bak", "# todo-by 2998-01-01 ignored by glob\n");
         write(
             ".git/COMMIT_EDITMSG",
             "fix: drop the todo-by 2998-01-01 tag\n",
         );
         write(".git/logs/HEAD", "0000 1111 commit: todo-by 2998-01-01\n");
+        // The same hazard in the layouts git is not the only one to have:
+        // a stored commit message, and a whole copy of a tracked file.
+        write(
+            ".hg/last-message.txt",
+            "fix: drop the todo-by 2998-01-01 tag\n",
+        );
+        write(
+            ".svn/pristine/aa/aabbcc.svn-base",
+            "// todo-by 2998-01-01 plain file\n",
+        );
+        write(".jj/repo/store/op_heads", "op: todo-by 2998-01-01 stored\n");
         root
     }
 
-    /// The four files above that are neither gitignored nor inside `.git`.
+    /// The fixture files left once the gitignored ones and everything
+    /// named as, or held by, a metadata directory are gone.
     const WALK_FIXTURE_FILES: [&str; 4] = [
         ".github/workflows/ci.yml",
         ".gitignore",
@@ -1605,6 +1630,54 @@ mod tests {
         let root = walk_fixture("scan");
         let roots = vec![root.clone()];
         assert_eq!(scanned(&roots, &root, None), walked(&roots, &root, None));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn every_metadata_dir_is_dropped_as_a_root_too() {
+        // Each of these stores commit text, and .svn/pristine stores whole
+        // copies of tracked files, so walking one turns a single tag into
+        // a phantom finding or a duplicate of a real one.
+        let root = walk_fixture("vcs-roots");
+        for dir in VCS_DIRS {
+            let path = root.join(dir);
+            if !path.exists() {
+                continue;
+            }
+            assert!(
+                walked(std::slice::from_ref(&path), &root, None).is_empty(),
+                "{dir} was walked when named as a root"
+            );
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_symlink_pointing_into_a_metadata_dir_is_dropped_too() {
+        // The root filter resolves before it matches, which no other test
+        // needs: deleting the canonicalize call leaves the rest green.
+        let root = walk_fixture("symlink");
+        let link = root.join("shortcut");
+        std::os::unix::fs::symlink(root.join(".git"), &link).unwrap();
+        assert!(walked(std::slice::from_ref(&link), &root, None).is_empty());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_file_named_on_the_command_line_is_scanned_even_when_gitignored() {
+        // The walker never filters a root it was handed directly, which is
+        // what lets an explicitly named path defeat .gitignore. Only the
+        // metadata directories are exempt from that.
+        let root = walk_fixture("named-file");
+        for name in ["ignored.txt", ".gitignore.bak"] {
+            let file = root.join(name);
+            assert_eq!(
+                walked(std::slice::from_ref(&file), &root, None),
+                [name],
+                "{name} named directly should still be scanned"
+            );
+        }
         std::fs::remove_dir_all(&root).ok();
     }
 

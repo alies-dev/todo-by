@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `.git` is never walked, with or without `--hidden`. It accounted for 97% of the files a `--hidden` scan read, and worse, `.git/COMMIT_EDITMSG` and `.git/logs` hold commit messages: a commit that merely discussed a tag read to the scanner exactly like the tag itself. The directory is matched by name, so the `.git` of a submodule or a nested checkout goes too, as does the `.git` file a worktree gets in place of a directory. Naming `.git` as a path argument does not reach it either, nor does running from inside it.
+- Version control metadata is never walked, with or without `--hidden`. `.git` accounted for 97% of the files a `--hidden` scan read in this repository, and worse, `.git/COMMIT_EDITMSG` and `.git/logs` hold commit messages: a commit that merely discussed a tag read to the scanner exactly like the tag itself. `.hg` stores the same thing, and `.svn` and `.jj` store whole copies of tracked files, which turns every real finding into a duplicate at a path nobody can edit. All four are matched by name, so a submodule's or a nested checkout's metadata goes too, as does the `.git` file a worktree gets in place of a directory. Naming one as a path argument does not reach it either, nor does running from inside it.
 
 ## [0.4.0] - 2026-08-26
 

@@ -147,7 +147,7 @@ Full workflow, checksum pinning, and how to phase it in on a codebase that alrea
 
 ## What gets scanned
 
-Everything git would track. `todo-by` uses ripgrep's directory walker, so `.gitignore` is honored with full git semantics (nested files, negation, `**` globs, `.git/info/exclude`), even outside a repository. Dotfiles and dotted directories are scanned like any other, `.github/workflows` among them, because git tracks them. `.git` is never walked, at no depth and not when named directly. Binary and symlinked files are skipped. Any other file named on the command line is always scanned, and the `exclude` config key covers whatever `.gitignore` does not.
+Everything git would track. `todo-by` uses ripgrep's directory walker, so `.gitignore` is honored with full git semantics (nested files, negation, `**` globs, `.git/info/exclude`), even outside a repository. Dotfiles and dotted directories are scanned like any other, `.github/workflows` among them, because git tracks them. Version control metadata (`.git`, `.hg`, `.svn`, `.jj`) is never walked, at no depth, and neither it nor anything inside it can be reached by naming a path either. Binary and symlinked files are skipped. Any other file named on the command line is scanned even when `.gitignore` covers it, and the `exclude` config key covers whatever `.gitignore` does not.
 
 ## Configuration
 
