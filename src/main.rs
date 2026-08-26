@@ -608,6 +608,24 @@ fn inside_vcs_dir(path: &Path) -> bool {
     probe.components().any(|c| is_vcs_dir(c.as_os_str()))
 }
 
+/// The roots `walk_builder` will drop, phrased for the user. Dropping
+/// them quietly would make `todo-by .git/hooks` exit 0 with no output,
+/// which is what a clean scan looks like, and the neighbouring check
+/// already speaks up about a path that does not exist. Whether a path is
+/// scanned stays `walk_builder`'s decision alone; this only describes it.
+fn skipped_root_notices(roots: &[PathBuf]) -> Vec<String> {
+    roots
+        .iter()
+        .filter(|root| inside_vcs_dir(root))
+        .map(|root| {
+            format!(
+                "skipping {}: version control metadata is never scanned",
+                root.display()
+            )
+        })
+        .collect()
+}
+
 /// The walker configuration both scanning modes share, so `--files` and
 /// the scan can never walk a different tree. The sets they report still
 /// differ by the binary files the scan drops after the walk yields them.
@@ -826,6 +844,9 @@ fn main() -> ExitCode {
             eprintln!("todo-by: path does not exist: {}", p.display());
             had_error = true;
         }
+    }
+    for notice in skipped_root_notices(&fs_paths) {
+        eprintln!("todo-by: {notice}");
     }
 
     if cli.files {
@@ -1718,6 +1739,26 @@ mod tests {
                 "{name} named directly should still be scanned"
             );
         }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_dropped_root_is_reported_rather_than_silently_ignored() {
+        let root = walk_fixture("skip-notice");
+        assert!(
+            skipped_root_notices(std::slice::from_ref(&root)).is_empty(),
+            "an ordinary root must not be announced"
+        );
+
+        let git = root.join(".git");
+        let notices = skipped_root_notices(&[root.clone(), git.clone(), git.join("hooks")]);
+        assert_eq!(notices.len(), 2, "one per dropped root: {notices:?}");
+        for notice in &notices {
+            assert!(notice.starts_with("skipping "), "{notice}");
+            assert!(notice.contains("never scanned"), "{notice}");
+        }
+        assert!(notices[0].contains(&git.display().to_string()));
+
         std::fs::remove_dir_all(&root).ok();
     }
 
