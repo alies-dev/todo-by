@@ -487,9 +487,9 @@ fn clean_message(rest: &str) -> String {
 const BINARY_PREFIX: usize = 8 * 1024;
 
 /// Whether content reads as binary: a NUL byte within the first
-/// [`BINARY_PREFIX`] bytes. Takes the whole content rather than a
-/// pre-trimmed prefix, so a caller holding the entire file (stdin) and one
-/// holding only the prefix ([`scan_file`]) share the same rule.
+/// [`BINARY_PREFIX`] bytes. Takes whatever the caller holds rather than a
+/// pre-trimmed prefix, and takes the window itself, so the rule does not
+/// depend on how much of the source happens to be in hand.
 fn is_binary(content: &[u8]) -> bool {
     content.iter().take(BINARY_PREFIX).any(|&b| b == 0)
 }
@@ -539,7 +539,13 @@ fn read_if_text<R: Read>(source: &mut R) -> std::io::Result<Option<Vec<u8>>> {
 /// these per worker, and a tool cache full of multi-gigabyte binaries is
 /// exactly the tree where the old read-then-decide order cost the most.
 /// Piped input goes through here too, so `cat big.bin | todo-by -` costs
-/// the prefix rather than the file.
+/// the prefix rather than the file. Stopping there leaves the rest of the
+/// pipe undrained, which is what `head` does and means the same thing: the
+/// writer gets `SIGPIPE`, and under `set -o pipefail` the *pipeline*
+/// reports the writer's death even though `todo-by` exited cleanly. Text
+/// is always read to the end, so this only reaches a binary source large
+/// enough to outlast the pipe buffer. Draining it to keep the writer
+/// happy would spend the read this exists to skip.
 pub fn scan_reader<R: Read>(
     file_label: &str,
     source: &mut R,

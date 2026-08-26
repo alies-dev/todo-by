@@ -6,7 +6,7 @@
 
 use std::ffi::OsStr;
 use std::io::{self, IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -76,7 +76,8 @@ Options:
   -h, --help               Print help
   -V, --version            Print version
 
-Exit codes: 0 no findings, 1 findings, 2 usage, config, or I/O error";
+Exit codes: 0 no findings, 1 findings, 2 usage, config, or I/O error,
+            or nothing left that the scan was allowed to read";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ColorWhen {
@@ -609,15 +610,45 @@ fn build_overrides(root: &Path, patterns: &[String]) -> Result<Option<Override>,
         .map_err(|err| format!("invalid exclude patterns: {err}"))
 }
 
-/// Metadata directories no scan should ever enter. Each one keeps commit
-/// text in plain files, and `.svn/pristine` keeps whole copies of tracked
-/// files, so walking one turns a single tag into a phantom finding at a
-/// path nobody can edit, or into a duplicate of a finding already
-/// reported. `.jj` does both, depending on its backend.
+/// Metadata directories no scan should ever enter. Every one of them
+/// keeps commit messages and the like, and a text field sits uncompressed
+/// inside its record whatever the encoding, so it reads to a scanner
+/// working on plain text exactly like the tag it was describing.
+/// `.svn/pristine` stores whole copies of tracked files on top of that
+/// (`.jj` does too, on its non-default backend), which turns a real
+/// finding into a duplicate at a path nobody can edit.
 const VCS_DIRS: [&str; 4] = [".git", ".hg", ".svn", ".jj"];
 
 fn is_vcs_dir(name: &OsStr) -> bool {
     name.to_str().is_some_and(|name| VCS_DIRS.contains(&name))
+}
+
+/// True when `path`, read as written, names one of [`VCS_DIRS`] or sits
+/// inside one.
+///
+/// `.` and `x/..` are cancelled first, so `$(git rev-parse --git-dir)/..`
+/// reads as the worktree root it is rather than as something inside
+/// `.git`. Cancelling `..` textually is not the same as resolving it when
+/// a symlink is involved, but it errs safely here: it can only make a
+/// path look more like metadata than it is, never less.
+fn names_vcs_dir(path: &Path) -> bool {
+    let mut kept: Vec<&OsStr> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // Cancels the component before it. One with nothing left
+                // to cancel walks out of the path as written, and what
+                // lies above is the resolved path's business.
+                kept.pop();
+            }
+            Component::Normal(name) => kept.push(name),
+            // Neither is ever a metadata directory, and neither can be
+            // cancelled by a `..` that follows it.
+            Component::RootDir | Component::Prefix(_) => kept.clear(),
+        }
+    }
+    kept.into_iter().any(is_vcs_dir)
 }
 
 /// True when `path` names one of [`VCS_DIRS`] or sits inside one, whether
@@ -631,8 +662,8 @@ fn is_vcs_dir(name: &OsStr) -> bool {
 /// plausible one), since resolving that erases the very component being
 /// matched on.
 fn inside_vcs_dir(path: &Path) -> bool {
-    let names_one = |p: &Path| p.components().any(|c| is_vcs_dir(c.as_os_str()));
-    names_one(path) || std::fs::canonicalize(path).is_ok_and(|resolved| names_one(&resolved))
+    names_vcs_dir(path)
+        || std::fs::canonicalize(path).is_ok_and(|resolved| names_vcs_dir(&resolved))
 }
 
 /// The roots `walk_builder` will drop, phrased for the user. Dropping
@@ -653,21 +684,39 @@ fn skipped_root_notices(roots: &[PathBuf]) -> Vec<String> {
         .collect()
 }
 
-/// Whether the roots given leave the walk nothing to start from because
-/// every one of them was dropped as version control metadata.
+/// Whether the walk was left with nowhere to start because every root it
+/// was given was dropped as version control metadata.
 ///
-/// That run scanned nothing at all, and from the outside it is
+/// That run walked nothing at all, and from the outside it is
 /// indistinguishable from a clean scan: no output, exit 0. The same
 /// reasoning that makes [`skipped_root_notices`] worth printing makes the
-/// exit code worth setting, and the neighbouring missing-path check
-/// already exits 2 for a root that could not be scanned. A run that kept
-/// at least one root is not this case: it scanned what it was given, and
-/// the notice names what it left out.
+/// exit code worth setting. A run that kept at least one root is not this
+/// case: it scanned what it was given, and the notice names what it left
+/// out.
 ///
-/// Empty roots means none were given (a bare `todo-by -`), which is not a
-/// dropped root and not an error.
+/// Refusing a metadata root is policy rather than failure, which is why
+/// this is narrower than the neighbouring missing-path check: that one
+/// exits 2 for a single bad path, since a path that is not there is a
+/// mistake in the invocation and nothing the tool promises to do about
+/// it. Being left with nothing to read is the one case where the policy
+/// has the same effect as the mistake.
+///
+/// Empty roots means none were given at all, which is not a dropped root.
+/// Whether that is an error is the caller's to decide, since stdin may
+/// still be a source; see [`nothing_left_to_read`].
 fn every_root_dropped(roots: &[PathBuf]) -> bool {
     !roots.is_empty() && roots.iter().all(|root| inside_vcs_dir(root))
+}
+
+/// Whether a scan has no source left after the dropped roots are gone.
+///
+/// Stdin counts, and that is the whole difference from
+/// [`every_root_dropped`]: `todo-by - .git` reads stdin, reports what it
+/// finds there, and is a scan that ran. `--files` is the exception, since
+/// it lists walked paths and never reads stdin at all, so nothing on
+/// stdin can save it from having nothing to list.
+fn nothing_left_to_read(roots: &[PathBuf], has_stdin: bool) -> bool {
+    !has_stdin && every_root_dropped(roots)
 }
 
 /// The walker configuration both scanning modes share, so `--files` and
@@ -925,9 +974,11 @@ fn main() -> ExitCode {
     for notice in skipped_root_notices(&fs_paths) {
         note!("{notice}");
     }
-    had_error = had_error || every_root_dropped(&fs_paths);
 
     if cli.files {
+        // `--files` never reads stdin, so a `-` among the paths cannot
+        // stand in for the roots that were dropped.
+        had_error = had_error || every_root_dropped(&fs_paths);
         let (paths, walk_error) = list_file_paths(&fs_paths, overrides);
         if let Err(code) = write_stdout(|w| {
             for p in &paths {
@@ -944,6 +995,7 @@ fn main() -> ExitCode {
         };
     }
 
+    had_error = had_error || nothing_left_to_read(&fs_paths, has_stdin);
     let (mut findings, walk_error) = scan_roots(&fs_paths, overrides, today, warn_until, &cfg.tags);
     had_error = had_error || walk_error;
 
@@ -1903,7 +1955,7 @@ mod tests {
 
         assert!(
             every_root_dropped(&[git.clone(), git.join("logs")]),
-            "nothing was left to scan, which must not exit 0"
+            "nothing was left to walk, which must not exit 0"
         );
         assert!(
             !every_root_dropped(&[root.clone(), git.clone()]),
@@ -1911,10 +1963,34 @@ mod tests {
         );
         assert!(
             !every_root_dropped(&[]),
-            "no roots at all means stdin, not a dropped root"
+            "no roots at all is not a dropped root"
         );
 
+        // Stdin is a source like any other, so a scan reading it ran even
+        // with its only path refused. `--files` cannot lean on that,
+        // which is why it asks `every_root_dropped` directly.
+        assert!(!nothing_left_to_read(std::slice::from_ref(&git), true));
+        assert!(nothing_left_to_read(std::slice::from_ref(&git), false));
+
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_parent_component_cancels_the_metadata_dir_before_it() {
+        // `$(git rev-parse --git-dir)/..` is how a script names the
+        // worktree root, and matching components as written would refuse
+        // it for the `.git` the `..` undoes.
+        assert!(!names_vcs_dir(Path::new(".git/../src")));
+        assert!(!names_vcs_dir(Path::new("../.git/../src")));
+        assert!(!names_vcs_dir(Path::new("./src")));
+        // What the cancelling must not reach.
+        assert!(names_vcs_dir(Path::new(".git")));
+        assert!(names_vcs_dir(Path::new("src/../.git/hooks")));
+        assert!(names_vcs_dir(Path::new("/tmp/repo/.git/logs/HEAD")));
+        // Exact names only: a directory that merely starts with one is
+        // ordinary content.
+        assert!(!names_vcs_dir(Path::new(".github/workflows")));
+        assert!(!names_vcs_dir(Path::new(".gitignore")));
     }
 
     #[test]
