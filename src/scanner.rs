@@ -311,8 +311,9 @@ fn parse_version_span(bytes: &[u8], start: usize) -> Option<usize> {
 /// isn't one. Two shapes commit: `#` followed by an alphanumeric, and an
 /// `http://` or `https://` URL.
 ///
-/// The `#` must be followed by an alphanumeric, so `todo-by # note` stays
-/// prose and is skipped the way any unrecognized trigger always has been.
+/// The `#` must be followed by a digit, so `todo-by # note` and
+/// `todo-by #cleanup` stay prose and are skipped the way any unrecognized
+/// trigger always has been.
 /// Once it commits the whole token is consumed (`#12x`, `#0`) rather than
 /// truncated to a valid-looking prefix, for the same reason dates and
 /// versions are: a truncated `#12x` would resolve to issue 12 and report on
@@ -326,13 +327,20 @@ fn parse_version_span(bytes: &[u8], start: usize) -> Option<usize> {
 fn parse_issue_span(bytes: &[u8], start: usize) -> Option<usize> {
     let mut j = start;
     if bytes.get(j) == Some(&b'#') {
-        if !bytes.get(j + 1).is_some_and(u8::is_ascii_alphanumeric) {
+        // A digit, not any alphanumeric: `#cleanup` is a word somebody wrote
+        // after a tag, and committing on it would report every
+        // `TODO: #cleanup` in a project that matches on `todo`. `#12x` still
+        // commits, because it starts with a digit, and is still reported.
+        if !bytes.get(j + 1).is_some_and(u8::is_ascii_digit) {
             return None;
         }
         j += 1;
+        // `/` is in the charset so `#123/456` reaches the validator whole
+        // and is reported, rather than being cut to a valid-looking `#123`
+        // that fires on the wrong issue with `/456` left as the message.
         while bytes
             .get(j)
-            .is_some_and(|&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+            .is_some_and(|&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'/'))
         {
             j += 1;
         }
@@ -348,7 +356,10 @@ fn parse_issue_span(bytes: &[u8], start: usize) -> Option<usize> {
         let j = trim_trailing_html_comment_dashes(bytes, j);
         return Some(trim_trailing_sentence_punctuation(bytes, start, j));
     }
-    if !(bytes[j..].starts_with(b"https://") || bytes[j..].starts_with(b"http://")) {
+    let scheme = |prefix: &[u8]| {
+        bytes.len() >= j + prefix.len() && bytes[j..j + prefix.len()].eq_ignore_ascii_case(prefix)
+    };
+    if !(scheme(b"https://") || scheme(b"http://")) {
         return unsupported_reference_span(bytes, start);
     }
     while bytes
@@ -413,7 +424,7 @@ fn trim_trailing_sentence_punctuation(bytes: &[u8], start: usize, mut end: usize
     while end > start
         && matches!(
             bytes[end - 1],
-            b'.' | b',' | b';' | b':' | b')' | b'"' | b'\''
+            b'.' | b',' | b';' | b':' | b'!' | b')' | b'"' | b'\''
         )
     {
         end -= 1;
@@ -439,29 +450,27 @@ fn trim_trailing_html_comment_dashes(bytes: &[u8], end: usize) -> usize {
 }
 
 fn clean_message(rest: &str) -> String {
-    let mut msg = rest.trim_start();
-    // An HTML comment closer and the punctuation joining a trigger to its
-    // message can arrive in either order, because the span parsers give
-    // both back: `#123.--> tail` leaves ".--> tail" here, while `#123--> t`
-    // leaves "--> t". So both are stripped until neither matches, rather
-    // than assuming one always comes first. Without the closer strip the
-    // message would open with a stray `->`; without the punctuation strip
-    // it would open with the period that ended the author's sentence.
-    loop {
-        let before = msg;
-        if let Some(stripped) = msg.strip_prefix("-->") {
-            msg = stripped.trim_start();
-        }
-        if let Some(stripped) = msg.strip_prefix(['-', ':', '.', ',']) {
-            msg = stripped.trim_start();
-        }
-        if msg == before {
-            break;
-        }
+    // One separator comes off, not a run of them: repeating the strip would
+    // eat the leading dashes of a message like `- --remove-old-flag`, which
+    // is content, not punctuation. The HTML comment closer is tried on both
+    // sides of it because the span parsers can hand back either order
+    // (`#123.--> t` leaves ".--> t", `#123--> t` leaves "--> t").
+    let strip_closer = |msg: &str| -> String {
+        msg.strip_prefix("-->")
+            .unwrap_or(msg)
+            .trim_start()
+            .to_string()
+    };
+    let mut msg = strip_closer(rest.trim_start());
+    // `)` and `;` are in the set because the span parsers give those back
+    // to the message the same way they give back a period.
+    if let Some(stripped) = msg.strip_prefix(['-', ':', '.', ',', ';', ')']) {
+        msg = stripped.trim_start().to_string();
     }
+    let mut msg = strip_closer(&msg);
     for closer in ["*/", "-->", "#}", "}}"] {
         if let Some(stripped) = msg.strip_suffix(closer) {
-            msg = stripped;
+            msg = stripped.to_string();
         }
     }
     msg.trim().to_string()

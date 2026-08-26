@@ -109,13 +109,17 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Cli, String> {
         // `--online=false` parses as the flag plus a discarded "false", so
         // silently ignoring it does the exact opposite of what was written.
         // Same for every other switch here.
-        const VALUELESS: [&str; 6] = [
+        const VALUELESS: [&str; 10] = [
             "--online",
             "--offline",
             "--exit-zero",
             "--hidden",
             "--files",
             "--dump-config",
+            "-h",
+            "--help",
+            "-V",
+            "--version",
         ];
         if inline_value.is_some() && VALUELESS.contains(&flag.as_str()) {
             return Err(format!("{flag} takes no value"));
@@ -868,19 +872,15 @@ fn main() -> ExitCode {
                     _ => None,
                 })
                 .collect();
-            let configured = cfg
-                .repo
-                .as_deref()
-                .and_then(|slug| issue::Repo::parse_slug(slug, "github.com"));
             // A request-level failure says nothing about any single
-            // reference, so it is reported once rather than once per tag.
-            // Whatever was answered before it is still applied: those
-            // findings are true, and the run exits 2 either way.
-            let (outcomes, failure) = issue::resolve(&refs, configured.as_ref(), &start_dir);
-            if let Some(err) = failure {
+            // reference, so it is reported once per host rather than once
+            // per tag. Whatever was answered before it is still applied:
+            // those findings are true, and the run exits 2 either way.
+            let (outcomes, failures) = issue::resolve(&refs, cfg.repo.as_ref(), &start_dir);
+            for err in &failures {
                 eprintln!("todo-by: {err}");
-                had_error = true;
             }
+            had_error = had_error || !failures.is_empty();
             resolve_issue_candidates(&mut findings, outcomes);
         } else {
             // Not an error: the trigger is opt-in, so "not checked" is the

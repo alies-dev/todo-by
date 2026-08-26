@@ -41,9 +41,10 @@ pub struct Config {
     /// Whether issue triggers may reach the network. `--online` and
     /// `--offline` both override this.
     pub online: Option<bool>,
-    /// Repository (`owner/name`) that bare `#123` references resolve
-    /// against, overriding git-remote inference.
-    pub repo: Option<String>,
+    /// Repository that bare `#123` references resolve against, overriding
+    /// git-remote inference. Parsed here rather than stored as a string, so
+    /// there is no second parse downstream that could fail silently.
+    pub repo: Option<crate::issue::Repo>,
     /// gitignore-style globs excluded on top of .gitignore.
     pub exclude: Vec<String>,
     /// Tags to match. Replaces the default entirely when set in the file.
@@ -104,7 +105,7 @@ pub fn parse(text: &str, label: &str) -> Result<Config, String> {
     let mut warn: Option<u32> = None;
     let mut version_cmd: Option<String> = None;
     let mut online: Option<bool> = None;
-    let mut repo: Option<String> = None;
+    let mut repo: Option<crate::issue::Repo> = None;
     let mut exclude: Option<Vec<String>> = None;
     let mut tags: Option<Vec<String>> = None;
     let mut seen_keys: Vec<&str> = Vec::new();
@@ -176,12 +177,12 @@ pub fn parse(text: &str, label: &str) -> Result<Config, String> {
                 let Value::Str(s) = value else {
                     return Err(format!("{label}:{line_no}: repo must be a string"));
                 };
-                if crate::issue::Repo::parse_slug(&s, "github.com").is_none() {
+                let Some(parsed) = crate::issue::Repo::parse_slug(&s, "github.com") else {
                     return Err(format!(
                         "{label}:{line_no}: invalid repo {s:?} (write \"owner/name\")"
                     ));
-                }
-                repo = Some(s);
+                };
+                repo = Some(parsed);
             }
             "exclude" => {
                 let Value::Array(items) = value else {
@@ -457,7 +458,11 @@ pub fn dump(cfg: &Config) -> String {
         None => out.push_str("# online = (not set)\n"),
     }
     match &cfg.repo {
-        Some(slug) => out.push_str(&format!("repo = \"{}\"\n", escape_str(slug))),
+        Some(repo) => out.push_str(&format!(
+            "repo = \"{}/{}\"\n",
+            escape_str(&repo.owner),
+            escape_str(&repo.name)
+        )),
         None => out.push_str("# repo = (not set)\n"),
     }
     out.push_str(&format!("exclude = {}\n", dump_array(&cfg.exclude)));
@@ -734,5 +739,60 @@ tags = [\"todo-by\"]
         assert_eq!(cfg.source, None);
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn booleans_parse_and_flags_override_nothing_by_themselves() {
+        let cfg = parse("online = true\n", "t").expect("valid");
+        assert_eq!(cfg.online, Some(true));
+        assert_eq!(parse("online = false\n", "t").unwrap().online, Some(false));
+        // A trailing comment after a boolean is still a comment.
+        assert_eq!(
+            parse("online = true # on for CI\n", "t").unwrap().online,
+            Some(true)
+        );
+        assert_eq!(parse("", "t").unwrap().online, None);
+    }
+
+    #[test]
+    fn a_boolean_key_rejects_everything_that_is_not_one() {
+        for text in [
+            "online = 1",
+            "online = \"true\"",
+            "online = truthy",
+            "online = tru",
+        ] {
+            assert!(parse(text, "t").is_err(), "expected {text:?} rejected");
+        }
+    }
+
+    #[test]
+    fn repo_is_parsed_once_and_rejected_when_malformed() {
+        let cfg = parse("repo = \"Acme/App\"\n", "t").expect("valid");
+        let repo = cfg.repo.expect("parsed");
+        // Lowercased on the way in, so two spellings of one repository
+        // cannot read as two.
+        assert_eq!((repo.owner.as_str(), repo.name.as_str()), ("acme", "app"));
+        assert_eq!(repo.host, "github.com");
+        for text in [
+            "repo = \"acme\"",
+            "repo = \"acme/\"",
+            "repo = \"/app\"",
+            "repo = \"acme/app/extra\"",
+            "repo = 12",
+        ] {
+            assert!(parse(text, "t").is_err(), "expected {text:?} rejected");
+        }
+    }
+
+    #[test]
+    fn dump_round_trips_the_new_keys() {
+        let cfg = parse("online = true\nrepo = \"acme/app\"\n", "t").expect("valid");
+        let dumped = dump(&cfg);
+        assert!(dumped.contains("online = true"), "{dumped}");
+        assert!(dumped.contains("repo = \"acme/app\""), "{dumped}");
+        let empty = dump(&Config::default());
+        assert!(empty.contains("# online = (not set)"), "{empty}");
+        assert!(empty.contains("# repo = (not set)"), "{empty}");
     }
 }

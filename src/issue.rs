@@ -55,10 +55,14 @@ impl Repo {
         if !valid_owner(owner) || !valid_name(name) {
             return None;
         }
+        // Lowercased because GitHub treats these case-insensitively while
+        // `Repo` is compared with `==`: without this, an `origin` of
+        // `Acme/App` and an `upstream` of `acme/app` are the same
+        // repository but report as an ambiguous fork checkout.
         Some(Repo {
             host: host.to_string(),
-            owner: owner.to_string(),
-            name: name.to_string(),
+            owner: owner.to_ascii_lowercase(),
+            name: name.to_ascii_lowercase(),
         })
     }
 
@@ -202,15 +206,16 @@ pub fn syntax_help(written: &str) -> String {
     if let Some(help) = unsupported_spelling(written) {
         return help;
     }
-    if written.starts_with('#') {
-        format!("invalid issue reference {written:?} (write #123, or the full issue URL)")
-    } else {
+    if written.starts_with("http") {
         format!("invalid issue URL {written:?} (write https://github.com/owner/repo/issues/123)")
+    } else {
+        format!("invalid issue reference {written:?} (write #123, or the full issue URL)")
     }
 }
 
-/// The spellings GitHub itself renders as issue links, which this tool
-/// does not accept. They are reported rather than ignored for the same
+/// Spellings other tools and trackers accept, which this one does not.
+/// GitHub itself autolinks `#123`, `GH-123` and `owner/repo#123`; `repo#123`
+/// is phpstan-todo-by's shorthand rather than GitHub's. They are reported rather than ignored for the same
 /// reason an unmarked `2.0` is: a tag written this way meant a trigger, and
 /// silence would bury the chore instead of surfacing it.
 ///
@@ -229,9 +234,12 @@ fn unsupported_spelling(written: &str) -> Option<String> {
     let (before, number) = written.rsplit_once('#')?;
     let number = parse_number(number)?;
     match before.split_once('/') {
+        // The URL is offered as an example, not as a fact: nothing in the
+        // tag says which host `owner/repo` lives on, and asserting
+        // github.com would send a GitHub Enterprise user to the wrong one.
         Some((owner, name)) if valid_owner(owner) && valid_name(name) => Some(format!(
-            "cross-repo reference {written:?} is not supported \
-             (write \"https://github.com/{owner}/{name}/issues/{number}\")"
+            "cross-repo reference {written:?} is not supported (write the full issue \
+             URL, e.g. \"https://github.com/{owner}/{name}/issues/{number}\")"
         )),
         None if valid_name(before) => Some(format!(
             "repository-qualified reference {written:?} is not supported \
@@ -266,15 +274,16 @@ pub enum Outcome {
 /// second batch says nothing about the closed issue the first one
 /// confirmed, and the run exits 2 anyway, so keeping that finding cannot be
 /// read as "everything else is fine". References nobody got an answer for
-/// are `Unanswered` and simply disappear. Only the first failure comes
-/// back, since one sentence per run is the point.
+/// are `Unanswered` and simply disappear. One failure comes back per host,
+/// since a run that loses two hosts should say so twice rather than hide
+/// the second behind the first.
 pub fn resolve(
     refs: &[Reference],
     configured: Option<&Repo>,
     dir: &Path,
-) -> (Vec<Outcome>, Option<String>) {
+) -> (Vec<Outcome>, Vec<String>) {
     if refs.is_empty() {
-        return (Vec::new(), None);
+        return (Vec::new(), Vec::new());
     }
 
     // The git remote is consulted at most once per run, and only if some
@@ -301,12 +310,13 @@ pub fn resolve(
     // cost on every one of them.
     let mut transport: Option<(String, Transport)> = None;
     let mut states: HashMap<(usize, u32), Result<String, String>> = HashMap::new();
-    let mut failure = None;
+    let mut failures: Vec<String> = Vec::new();
     // A host that fails is abandoned, and only that host: an unreachable
     // enterprise instance says nothing about the github.com references in
     // the same tree, and letting it decide their fate would make the
     // reported findings depend on which host happened to be tried first.
     let mut dead: Vec<String> = Vec::new();
+    let mut remote_host: Option<Option<String>> = None;
     for batch in batches(&targets, &repos) {
         let repo = &repos[batch[0].0];
         if dead.contains(&repo.host) {
@@ -319,21 +329,31 @@ pub fn resolve(
             match choose_transport(&repo.host, env_token()) {
                 Ok(picked) => transport = Some((repo.host.clone(), picked)),
                 Err(err) => {
-                    failure.get_or_insert(err);
+                    failures.push(err);
                     dead.push(repo.host.clone());
                     continue;
                 }
             }
         }
+        // A host is trusted when it came from this checkout (github.com, or
+        // whatever the git remote points at), not from the text of a
+        // comment. The remote is consulted at most once, and only if a
+        // non-github.com host actually turns up.
+        let trusted = repo.host == "github.com" || {
+            remote_host
+                .get_or_insert_with(|| default_repo(dir).ok().map(|r| r.host))
+                .as_deref()
+                == Some(repo.host.as_str())
+        };
         let (url, body) = request(&repos, &batch);
         let sent = transport
             .as_ref()
             .expect("transport chosen above")
             .1
-            .send(repo, &url, &body)
+            .send(repo, &url, &body, trusted)
             .and_then(|response| read_response(&response, &batch, &mut states));
         if let Err(err) = sent {
-            failure.get_or_insert(err);
+            failures.push(err);
             dead.push(repo.host.clone());
         }
     }
@@ -346,24 +366,34 @@ pub fn resolve(
                 Err(err) => return Outcome::Failed(err),
             };
             match states.get(&key) {
-                Some(Ok(state)) if state == "OPEN" => Outcome::Open,
-                Some(Ok(state)) => Outcome::Fired {
-                    state: if state == "MERGED" {
-                        "merged"
-                    } else {
-                        "closed"
-                    },
-                    url: repos[key.0].issue_url(key.1),
-                },
+                Some(Ok(state)) => outcome_for(state, &repos[key.0], key.1),
                 Some(Err(err)) => Outcome::Failed(err.clone()),
-                // Unreachable while `failure` is None: every reference in
+                // Reachable only when a request failed: every reference in
                 // `targets` was in some batch, and a batch that returned
                 // filled all of its own keys.
                 None => Outcome::Unanswered,
             }
         })
         .collect();
-    (outcomes, failure)
+    (outcomes, failures)
+}
+
+/// Turns a GraphQL `state` into an outcome. Anything other than `OPEN`
+/// fires, so a state this tool has never heard of reports rather than
+/// disappears; `MERGED` is named as such because "closed" would understate
+/// what happened to a pull request.
+fn outcome_for(state: &str, repo: &Repo, number: u32) -> Outcome {
+    match state {
+        "OPEN" => Outcome::Open,
+        "MERGED" => Outcome::Fired {
+            state: "merged",
+            url: repo.issue_url(number),
+        },
+        _ => Outcome::Fired {
+            state: "closed",
+            url: repo.issue_url(number),
+        },
+    }
 }
 
 /// Splits the resolved targets into per-host batches of at most [`BATCH`]
@@ -522,19 +552,14 @@ fn read_response(
     Ok(())
 }
 
-/// Strips control characters from anything a server said before it reaches
-/// a terminal. Response bodies and GraphQL messages are remote input, and
-/// an escape sequence in one would otherwise repaint the user's screen from
-/// inside a finding.
+/// Flattens every control character in anything a server said before it
+/// reaches a terminal. Response bodies and GraphQL messages are remote
+/// input: an escape sequence would repaint the user's screen from inside a
+/// finding, and a newline would forge an extra line that reads exactly like
+/// one, so line feeds and tabs go too.
 fn sanitize(s: &str) -> String {
     s.chars()
-        .map(|c| {
-            if c == '\n' || c == '\t' || !c.is_control() {
-                c
-            } else {
-                ' '
-            }
-        })
+        .map(|c| if c.is_control() { ' ' } else { c })
         .collect()
 }
 
@@ -542,8 +567,10 @@ fn sanitize(s: &str) -> String {
 /// Truncated because an HTML error page from a proxy is otherwise thousands
 /// of lines.
 fn excerpt(response: &str) -> String {
+    // Sanitizing flattens newlines first, so what is left is one line; the
+    // trim removes the whitespace that flattening created at its head.
     let cleaned = sanitize(response);
-    let line = cleaned.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    let line = cleaned.trim();
     if line.len() > 200 {
         // Byte-slicing a response from somebody else's proxy is how a
         // reporting path panics: the cut must land on a character boundary.
@@ -626,9 +653,9 @@ fn have(program: &str) -> bool {
 }
 
 impl Transport {
-    fn send(&self, repo: &Repo, url: &str, body: &str) -> Result<String, String> {
+    fn send(&self, repo: &Repo, url: &str, body: &str, trusted: bool) -> Result<String, String> {
         match self {
-            Transport::Gh => send_gh(repo, body),
+            Transport::Gh => send_gh(repo, body, trusted),
             Transport::Curl(token) => send_curl(token, url, body),
         }
     }
@@ -636,11 +663,28 @@ impl Transport {
 
 /// `gh api graphql --input -` posts the same body curl does, so both
 /// transports share the request builder and the response reader.
-fn send_gh(repo: &Repo, body: &str) -> Result<String, String> {
+fn send_gh(repo: &Repo, body: &str, trusted: bool) -> Result<String, String> {
     let mut cmd = Command::new("gh");
-    cmd.args(["api", "graphql", "--input", "-"]);
-    if repo.host != "github.com" {
-        cmd.args(["--hostname", &repo.host]);
+    // `--hostname` is passed unconditionally, github.com included: gh reads
+    // GH_HOST from the environment, which a GitHub Enterprise user normally
+    // has set, and it would otherwise send every `#123` to their instance
+    // instead of to github.com.
+    cmd.args(["api", "graphql", "--input", "-", "--hostname", &repo.host]);
+    // Routing a host through `gh` is not by itself confinement: gh reads
+    // these four variables out of the inherited environment and will use
+    // them for `*.ghe.com` and for enterprise hosts. A host that came from
+    // a comment rather than from this checkout therefore gets the
+    // credential stripped, leaving gh to fall back to its own per-host
+    // keyring or to fail closed.
+    if !trusted {
+        for name in [
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GH_ENTERPRISE_TOKEN",
+            "GITHUB_ENTERPRISE_TOKEN",
+        ] {
+            cmd.env_remove(name);
+        }
     }
     let ran = run(cmd, body.as_bytes())?;
     if ran.status.success() {
@@ -701,6 +745,12 @@ fn send_curl(token: &str, url: &str, body: &str) -> Result<String, String> {
     // two bodies and two status lines and the reader would call a request
     // that eventually succeeded unreadable.
     cmd.args([
+        // `-q` must come first, and must be present at all: without it curl
+        // reads ~/.curlrc before anything else, and a line like
+        // `trace-ascii /tmp/curl.log` there would write the Authorization
+        // header to disk, breaking the guarantee this whole transport is
+        // built around.
+        "-q",
         "--config",
         "-",
         "--silent",
@@ -712,11 +762,12 @@ fn send_curl(token: &str, url: &str, body: &str) -> Result<String, String> {
     // escaped here. The token is the only value that can realistically
     // contain either.
     let config = format!(
-        "url = \"{url}\"\n\
+        "url = \"{}\"\n\
          header = \"Authorization: Bearer {}\"\n\
          header = \"Content-Type: application/json\"\n\
          data-binary = \"@{}\"\n\
          write-out = \"\\n%{{http_code}}\"\n",
+        escape_curl(url),
         escape_curl(token),
         escape_curl(&path.display().to_string()),
     );
@@ -816,14 +867,35 @@ struct Ran {
 const MAX_RESPONSE: usize = 8 * 1024 * 1024;
 const MAX_STDERR: usize = 64 * 1024;
 
-/// Reads at most `cap` bytes, reporting whether the source had more.
-fn read_capped(source: impl std::io::Read, cap: usize) -> std::io::Result<(Vec<u8>, bool)> {
-    use std::io::Read;
-    let mut buf = Vec::new();
-    source.take(cap as u64 + 1).read_to_end(&mut buf)?;
-    let overflowed = buf.len() > cap;
-    buf.truncate(cap);
-    Ok((buf, overflowed))
+/// Reads a source to its end, retaining at most `cap` bytes and reporting
+/// whether there were more.
+///
+/// Reading to the end matters even when the excess is thrown away: stopping
+/// at the cap would drop the pipe, and the child's next write would take an
+/// EPIPE and kill it. `GH_DEBUG=api` makes that reachable on stderr, and
+/// the process would die mid-request for no reason the user could see.
+fn read_capped(mut source: impl std::io::Read, cap: usize) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut kept = Vec::new();
+    let mut overflowed = false;
+    let mut chunk = [0u8; 8192];
+    loop {
+        let read = match source.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        };
+        let room = cap.saturating_sub(kept.len());
+        if room == 0 {
+            overflowed = true;
+        } else if read > room {
+            kept.extend_from_slice(&chunk[..room]);
+            overflowed = true;
+        } else {
+            kept.extend_from_slice(&chunk[..read]);
+        }
+    }
+    Ok((kept, overflowed))
 }
 
 /// Spawns `cmd`, writes `input` to its stdin, and collects its output.
@@ -888,17 +960,10 @@ fn run(mut cmd: Command, input: &[u8]) -> Result<Ran, String> {
         ));
     }
 
-    // The draining thread stops at MAX_STDERR, so a child still writing
-    // past it would block forever on a full pipe; killing it first makes
-    // `wait` return. Under the cap the pipe is already at EOF and the kill
-    // is a no-op on an exited child.
+    // The draining thread reads to EOF regardless of the cap, so nothing is
+    // blocked here and the join simply collects what it kept.
     let stderr = match draining.join() {
-        Ok(Ok((bytes, overflowed))) => {
-            if overflowed {
-                let _ = child.kill();
-            }
-            bytes
-        }
+        Ok(Ok((bytes, _))) => bytes,
         _ => Vec::new(),
     };
     let status = child
@@ -918,17 +983,32 @@ fn run(mut cmd: Command, input: &[u8]) -> Result<Ran, String> {
 /// somebody else's tracker without a word. So a disagreement is reported
 /// and `repo` in the config is named as the way to settle it.
 fn default_repo(dir: &Path) -> Result<Repo, String> {
-    const FIX: &str = "set repo = \"owner/name\" in todo-by.toml";
     let origin = remote_repo(dir, "origin");
     let upstream = remote_repo(dir, "upstream");
+    // `repo` only ever names a github.com repository, so pointing a
+    // GitHub Enterprise user at it would send their `#123` to the wrong
+    // host, which is the failure this error exists to prevent.
+    let fix = |repo: Option<&Repo>| match repo {
+        Some(repo) if repo.host != "github.com" => format!(
+            "write these references as full {} issue URLs; the repo config key is \
+             github.com only",
+            repo.host
+        ),
+        _ => "set repo = \"owner/name\" in todo-by.toml".to_string(),
+    };
     match (origin, upstream) {
         (Some(origin), Some(upstream)) if origin != upstream => Err(format!(
-            "#N is ambiguous here: origin is {}/{} but upstream is {}/{}; {FIX}",
-            origin.owner, origin.name, upstream.owner, upstream.name
+            "#N is ambiguous here: origin is {}/{} but upstream is {}/{}; {}",
+            origin.owner,
+            origin.name,
+            upstream.owner,
+            upstream.name,
+            fix(Some(&origin))
         )),
         (Some(repo), _) | (None, Some(repo)) => Ok(repo),
         (None, None) => Err(format!(
-            "could not determine the repository for #N from a git remote; {FIX}"
+            "could not determine the repository for #N from a git remote; {}",
+            fix(None)
         )),
     }
 }
@@ -983,11 +1063,14 @@ pub fn parse_remote_url(url: &str) -> Option<Repo> {
 
 fn build_repo(host: &str, path: &str) -> Option<Repo> {
     let host = normalize_host(host);
-    let path = path.strip_suffix(".git").unwrap_or(path);
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     let [.., owner, name] = segments[..] else {
         return None;
     };
+    // `.git` comes off the last segment rather than the whole path, so a
+    // remote written with a trailing slash (`owner/repo.git/`) does not end
+    // up as a repository literally named `repo.git`.
+    let name = name.strip_suffix(".git").unwrap_or(name);
     if !valid_host(&host) {
         return None;
     }
@@ -1212,6 +1295,38 @@ mod tests {
     }
 
     #[test]
+    fn the_firing_rule_is_open_versus_everything_else() {
+        let repo = repo("github.com", "o", "r");
+        assert!(matches!(outcome_for("OPEN", &repo, 1), Outcome::Open));
+        assert!(matches!(
+            outcome_for("CLOSED", &repo, 1),
+            Outcome::Fired {
+                state: "closed",
+                ..
+            }
+        ));
+        assert!(matches!(
+            outcome_for("MERGED", &repo, 1),
+            Outcome::Fired {
+                state: "merged",
+                ..
+            }
+        ));
+        // A state this tool has never heard of fires rather than vanishing.
+        assert!(matches!(
+            outcome_for("DRAFT", &repo, 1),
+            Outcome::Fired {
+                state: "closed",
+                ..
+            }
+        ));
+        match outcome_for("CLOSED", &repo, 9) {
+            Outcome::Fired { url, .. } => assert_eq!(url, "https://github.com/o/r/issues/9"),
+            _ => panic!("expected a fired outcome"),
+        }
+    }
+
+    #[test]
     fn reads_states_and_per_reference_errors() {
         let response = r#"{"data":{"r0":{"n1":{"state":"OPEN"},"n2":{"state":"MERGED"},
                            "n3":null}},"errors":[{"path":["r0","n3"],
@@ -1403,9 +1518,9 @@ mod tests {
                 number: 2,
             },
         ];
-        let (outcomes, failure) = resolve(&refs, None, &dir);
+        let (outcomes, failures) = resolve(&refs, None, &dir);
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(failure.is_none(), "no request was attempted");
+        assert!(failures.is_empty(), "no request was attempted");
         assert_eq!(outcomes.len(), 2);
         for outcome in outcomes {
             match outcome {
@@ -1445,6 +1560,9 @@ mod tests {
     fn excerpt_truncates_a_long_line() {
         let long = "x".repeat(500);
         assert_eq!(excerpt(&long).len(), 203);
-        assert_eq!(excerpt("\n\nfirst\nsecond"), "first");
+        // Newlines are flattened before the first line is taken, so a
+        // multi-line body arrives as one line rather than as several that
+        // could pass for separate findings.
+        assert_eq!(excerpt("\n\nfirst\nsecond"), "first second");
     }
 }

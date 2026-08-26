@@ -172,7 +172,7 @@ Use `--dump-config` to see the effective config and where it came from, and `--f
 
 ## Prior art
 
-Inspired by [phpstan/phpstan-todo-by](https://github.com/staabm/phpstan-todo-by) by Markus Staab, which does this for PHP files as a PHPStan extension, with package version triggers `todo-by` does not have. `todo-by` trades those for working on any file type with no runtime.
+Inspired by [phpstan/phpstan-todo-by](https://github.com/staabm/phpstan-todo-by) by Markus Staab.
 
 ## License
 

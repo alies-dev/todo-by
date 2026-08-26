@@ -20,11 +20,11 @@ A tag can fire once a GitHub issue or pull request closes.
 
 A marker is required, as with the `v` on a version: a `#` with a digit behind it, or the `GH-` form. That is what tells a trigger from a date, from a version, and from prose.
 
-The spellings GitHub renders as links (`owner/repo#123`, `repo#123`, `GH-123`) are recognized only in order to be rejected. **None of them ever fires or reaches the network.** They are recognized at all so the tag gets an error naming the accepted spelling instead of silently disappearing, which is the outcome this tool exists to prevent:
+The spellings other tools accept (`owner/repo#123` and `GH-123`, which GitHub autolinks, and `repo#123`, which phpstan-todo-by takes) are recognized only in order to be rejected. **None of them ever fires or reaches the network.** They are recognized at all so the tag gets an error naming the accepted spelling instead of silently disappearing, which is the outcome this tool exists to prevent:
 
 ```console
 $ todo-by
-src/legacy.rs:8: cross-repo reference "acme/lib#452" is not supported (write "https://github.com/acme/lib/issues/452"): drop the shim
+src/legacy.rs:8: cross-repo reference "acme/lib#452" is not supported (write the full issue URL, e.g. "https://github.com/acme/lib/issues/452"): drop the shim
 ```
 
 A token carrying no marker stays prose. That matters because `tags` is configurable: a project matching on `todo` would otherwise have every `TODO: refactor later` in the tree reported, and `todo-by` does not police undated TODOs.
@@ -59,7 +59,11 @@ There is no HTTP client inside `todo-by`. It shells out, which is what keeps the
 1. `curl`, when `GH_TOKEN` or `GITHUB_TOKEN` is set and the target is github.com. The token travels in curl's config file on stdin, so it never reaches the process list or the disk, and the request gets a timeout of 30 seconds.
 2. `gh`, otherwise, authenticating from its own keyring, so a laptop that has run `gh auth login` needs no setup.
 
-**An environment token is only ever sent to github.com.** A tag names its own host and a tag is repository content, so a comment reading `todo-by https://evil.example/o/r/issues/1` must not be able to make a CI run hand `$GITHUB_TOKEN` to whatever host it names. Every other host goes through `gh`, which keeps credentials per host and fails closed when it has none for that one. That is also the correct behavior for GitHub Enterprise, where a github.com token is the wrong credential anyway.
+**An environment token only ever reaches a host this checkout named.** A tag names its own host and a tag is repository content, so a comment reading `todo-by https://evil.example/o/r/issues/1` must not be able to make a CI run hand `$GITHUB_TOKEN` to whatever host it names.
+
+Two rules enforce that. curl is used only for github.com, so the `Authorization` header cannot go anywhere else. And `gh`, which reads `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN` and `GITHUB_ENTERPRISE_TOKEN` out of the environment on its own, gets all four removed from its environment unless the host is github.com or the host your git remote points at. `gh` then falls back to its per-host keyring, or fails closed. Your own GitHub Enterprise instance keeps working, because it is the one your remote names.
+
+`--hostname` is always passed to `gh`, github.com included, since a `GH_HOST` in the environment would otherwise redirect every `#123` to an enterprise instance.
 
 The identity is the same either way, since `gh` also prefers those variables over its keyring. With neither transport usable, `--online` exits 2 rather than skipping the check quietly. Note that `gh` has no timeout flag, so a `gh`-backed run waits as long as the network does, exactly as `version-cmd` and `git describe` already do.
 

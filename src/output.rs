@@ -122,6 +122,18 @@ fn issue_closed_phrase(written: &str, state: &str, url: &str) -> String {
     }
 }
 
+/// Phrase for an issue trigger that could not be acted on. A syntax
+/// complaint already quotes the reference, but an answer from the API
+/// ("not found") does not, and with two triggers on one line the reader
+/// would have no way to tell which one failed.
+fn issue_error_phrase(written: &str, detail: &str) -> String {
+    if detail.contains(written) {
+        detail.to_string()
+    } else {
+        format!("{written}: {detail}")
+    }
+}
+
 fn render_text(f: &Finding, opts: &RenderOpts) -> String {
     let (phrase, color) = match &f.kind {
         Kind::Overdue { written, .. } => (format!("overdue since {written}"), RED),
@@ -143,7 +155,7 @@ fn render_text(f: &Finding, opts: &RenderOpts) -> String {
             state,
             url,
         } => (issue_closed_phrase(written, state, url), RED),
-        Kind::IssueError { detail, .. } => (detail.clone(), RED),
+        Kind::IssueError { written, detail } => (issue_error_phrase(written, detail), RED),
         Kind::VersionPending { .. } | Kind::IssuePending { .. } => {
             unreachable!("resolved or dropped in main")
         }
@@ -190,7 +202,10 @@ fn render_github(f: &Finding, today: Date, current_version: Option<&str>) -> Str
             "error",
             format!("todo-by {}", issue_closed_phrase(written, state, url)),
         ),
-        Kind::IssueError { detail, .. } => ("error", format!("todo-by {detail}")),
+        Kind::IssueError { written, detail } => (
+            "error",
+            format!("todo-by {}", issue_error_phrase(written, detail)),
+        ),
         Kind::VersionPending { .. } | Kind::IssuePending { .. } => {
             unreachable!("resolved or dropped in main")
         }
@@ -798,9 +813,16 @@ mod tests {
             today: Date::new(2026, 8, 26).unwrap(),
             current_version: None,
         };
+        // A bare answer from the API says nothing about which reference it
+        // belongs to, so the reference is prefixed.
         assert_eq!(
             render_finding(&f, &opts),
-            "src/a.rs:4: invalid issue reference: drop the shim"
+            "src/a.rs:4: #12x: invalid issue reference: drop the shim"
+        );
+        // A syntax complaint already quotes it, so it is not repeated.
+        assert_eq!(
+            issue_error_phrase("#12x", "invalid issue reference \"#12x\" (write #123)"),
+            "invalid issue reference \"#12x\" (write #123)"
         );
         let json = render_json_finding(&f, opts.today, None);
         assert!(json.contains(r#""kind":"issue-error""#), "{json}");
