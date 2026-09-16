@@ -3,8 +3,20 @@ updates:
   - package-ecosystem: cargo
     directory: /
     schedule:
-      interval: monthly
+      interval: quarterly
+    # One PR per quarter for all crates instead of one PR per crate.
+    # Security updates are unaffected: they ignore the schedule and still
+    # open immediately as individual PRs.
+    groups:
+      cargo:
+        patterns:
+          - "*"
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: monthly
+      interval: quarterly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
