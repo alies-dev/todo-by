@@ -127,7 +127,7 @@ fn a_metadata_spelling_of_a_real_root_does_not_hide_it() {
 
 #[test]
 fn an_explicit_root_gitignored_by_its_parent_keeps_full_coverage() {
-    // README: a path named on the command line is walked with root
+    // docs/scanning.md: a path named on the command line is walked with root
     // semantics; ignore rules do not apply to it. Naming `.` alongside
     // it must not take that away.
     let dir = tree("gitignored-nested-root");
