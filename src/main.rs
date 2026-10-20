@@ -672,7 +672,7 @@ fn inside_vcs_dir(path: &Path) -> bool {
 /// the first spelling, so a root typed twice is not walked twice. A root
 /// that merely nests inside another is left alone: it keeps its own
 /// entry in `roots`, since naming a path on the command line gives it
-/// root semantics (README: ignore rules do not apply to it), and a root
+/// root semantics (docs/scanning.md: ignore rules do not apply to it), and a root
 /// dropped here would silently lose that for anything gitignored. Nested
 /// overlap is instead resolved inside the walk itself, in
 /// [`walk_builder`], which is the only place that can tell a covered
@@ -2145,7 +2145,7 @@ mod tests {
     #[test]
     fn a_root_nested_inside_another_is_kept_and_walked_once() {
         // v2 contract: a path named on the command line keeps root
-        // semantics (README: ignore rules do not apply to it), so
+        // semantics (docs/scanning.md: ignore rules do not apply to it), so
         // nesting alone must not remove it — only an exact repeat does.
         // Both roots survive `collapse_duplicate_roots`; it is the walk
         // itself that must still cover the nested root's files exactly

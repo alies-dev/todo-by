@@ -26,3 +26,5 @@ jobs:
 ```
 
 On a codebase with existing overdue tags, phase it in with `continue-on-error: true`, or `todo-by --warn N --exit-zero` so deadlines surface without failing the build. The release also ships an installer script if you prefer it to the checksum dance.
+
+A reader that stops reading does not change the exit code: `todo-by | head -4` ends the output where `head` stopped and reports on the scan it ran, so `set -o pipefail` still fails a job whose tree has overdue tags.
