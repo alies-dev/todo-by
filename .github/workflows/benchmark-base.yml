@@ -27,11 +27,11 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: Install hyperfine
-        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
+        uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
         with:
           tool: hyperfine
 
-      - uses: bencherdev/bencher@8d75325c3bc59403a2186a056b472c4f49d42838 # v0.6.12
+      - uses: bencherdev/bencher@f80847436d7157936b40525db4c2a1064124f04a # v0.6.13
 
       - name: Fetch corpus
         run: git clone --depth 1 --branch "$CORPUS_REF" "https://github.com/$CORPUS_REPO" /tmp/corpus
