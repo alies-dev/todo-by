@@ -20,6 +20,7 @@ Write a TODO with a trigger. `todo-by` stays quiet until the trigger fires, then
 | Code must survive 2.0 and go right after it | `// @todo-by >v2.0 remove the 1.x config migration` |
 | A test is skipped until your bug is fixed | `// @todo-by #482 re-enable the flaky upload test` |
 | You work around a bug in a dependency | `// @todo-by https://github.com/acme/http/issues/45 remove the retry workaround` |
+| You patched a dependency until their fix merges | `# @todo-by https://github.com/acme/http/pull/88 drop the vendored patch` |
 
 Once a trigger fires:
 
@@ -47,7 +48,7 @@ Or `cargo install todo-by-cli --locked`, or a prebuilt binary from [Releases](ht
 ```console
 todo-by              # scan the current directory, exit 1 if anything is due
 todo-by --warn 14    # also warn about dates due within 14 days
-todo-by --online     # also check issue triggers against GitHub
+todo-by --online     # also check issue and pull request triggers against GitHub
 ```
 
 In CI, run the same command; it prints GitHub annotations inside Actions. A ready workflow is in [docs/ci.md](https://github.com/alies-dev/todo-by/blob/main/docs/ci.md).
@@ -56,7 +57,7 @@ In CI, run the same command; it prints GitHub annotations inside Actions. A read
 
 - [Date triggers](https://github.com/alies-dev/todo-by/blob/main/docs/dates.md): accepted formats and early warnings
 - [Version triggers](https://github.com/alies-dev/todo-by/blob/main/docs/versions.md): constraints and where the current version comes from
-- [Issue triggers](https://github.com/alies-dev/todo-by/blob/main/docs/issues.md): tokens, private repositories, failures
+- [Issue and pull request triggers](https://github.com/alies-dev/todo-by/blob/main/docs/issues.md): tokens, private repositories, failures
 - [Usage](https://github.com/alies-dev/todo-by/blob/main/docs/usage.md): every flag, output formats, exit codes
 - [Configuration](https://github.com/alies-dev/todo-by/blob/main/docs/configuration.md): `todo-by.toml` and environment variables
 - [What gets scanned](https://github.com/alies-dev/todo-by/blob/main/docs/scanning.md): ignore rules, dotfiles, binaries
